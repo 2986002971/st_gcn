@@ -1,0 +1,17 @@
+[project]
+authors = ["Horned_Axe <horned_axe@proton.me>"]
+channels = ["nvidia", "conda-forge", "pytorch"]
+description = "Add a short description here"
+name = "data_process"
+platforms = ["linux-64", "win-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.12"
+cuda = { version = "*", channel = "nvidia" }
+pytorch = { version = "*", channel = "pytorch" }
+torchvision = { version = "*", channel = "pytorch" }
+pytorch-cuda = { version = "*", channel = "pytorch" }
+ultralytics = "*"
