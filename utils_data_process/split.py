@@ -39,7 +39,7 @@ class DatasetSplitter:
             train_folder: 训练集输出目录，默认为 "./processed/train"
             test_folder: 测试集输出目录，默认为 "./processed/val"
             labels: 标签列表，默认为 DEFAULT_LABELS
-            split_ratio: 训练集比例，默认0.8
+            split_ratio: 训练集比例, 默认0.8
         """
         self.data_root = data_root
         self.train_folder = train_folder

@@ -1,10 +1,10 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 
-def get_hop_distance(num_node, edge, max_hop=1):
+def get_hop_distance(num_node, edge, max_hop=2):
     A = np.zeros((num_node, num_node))
     for i, j in edge:
         A[j, i] = 1
@@ -52,7 +52,7 @@ class Graph:
 
     """
 
-    def __init__(self, layout="coco", strategy="uniform", max_hop=1, dilation=1):
+    def __init__(self, layout="coco", strategy="spatial", max_hop=2, dilation=1):
         self.max_hop = max_hop
         self.dilation = dilation
 
@@ -373,7 +373,7 @@ class ST_GCN_18(nn.Module):
         else:
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
-        # fcn for prediction
+        # 只保留分类��，移除准确度预测分支
         self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
 
     def forward(self, x):
@@ -394,9 +394,8 @@ class ST_GCN_18(nn.Module):
         x = F.avg_pool2d(x, x.size()[2:])
         x = x.view(N, M, -1, 1, 1).mean(dim=1)
 
-        # prediction
-        x = self.fcn(x)
-        x = x.view(x.size(0), -1)
+        # 输出logits
+        x = self.fcn(x).view(x.size(0), -1)
 
         return x
 

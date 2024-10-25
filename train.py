@@ -6,6 +6,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
@@ -125,10 +126,11 @@ class SkeletonFeeder(Dataset):
         with open(self.data_path, "rb") as f:
             self.data = np.load(f, allow_pickle=True)
         with open(self.label_path, "rb") as f:
-            self.sample_name, self.label = pickle.load(f)
+            self.sample_name, self.label, self.accuracy = pickle.load(f)  # 加载准确度
 
-        # 确保标签是整数数组
+        # 确保标签和准确度是正确的数据类型
         self.label = np.array(self.label, dtype=np.int64)
+        self.accuracy = np.array(self.accuracy, dtype=np.float32)
 
     def __len__(self):
         return len(self.label)
@@ -136,13 +138,18 @@ class SkeletonFeeder(Dataset):
     def __getitem__(self, index):
         data_numpy = self.data[index]
         label = self.label[index]
+        accuracy = self.accuracy[index]  # 获取准确度
 
         if self.random_choose:
             data_numpy = random_choose(data_numpy, self.window_size)
         if self.random_move:
             data_numpy = random_move(data_numpy)
 
-        return torch.FloatTensor(data_numpy), torch.LongTensor([label]).squeeze()
+        return (
+            torch.FloatTensor(data_numpy),
+            torch.LongTensor([label]).squeeze(),
+            torch.FloatTensor([accuracy]).squeeze(),  # 返回准确度
+        )
 
 
 def get_dataloader(data_path, label_path, batch_size, **kwargs):
@@ -171,10 +178,11 @@ def train(args):
     )
 
     # 模型定义
-    graph_cfg = {"layout": "coco", "strategy": "spatial"}
+    num_class = 14  # 定义类别数
+    graph_cfg = {"layout": "coco", "strategy": "spatial", "max_hop": 2}
     model = ST_GCN_18(
         in_channels=3,
-        num_class=14,
+        num_class=num_class,
         edge_importance_weighting=True,
         graph_cfg=graph_cfg,
     ).to(device)
@@ -196,45 +204,87 @@ def train(args):
         print(f"Resuming from epoch {start_epoch}")
 
     # 训练循环
-    total_epochs = 50
+    total_epochs = 500
     for epoch in range(start_epoch, total_epochs):
-        # 训练阶段
         model.train()
-        for _ in range(5):  # 训练5个epoch
-            for batch_idx, (data, target) in enumerate(train_loader):
-                data, target = data.to(device), target.to(device)
+        train_loss = 0
+        for batch_idx, (data, target, accuracy) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            accuracy = accuracy.to(device)
 
-                optimizer.zero_grad()
-                output = model(data)
-                loss = criterion(output, target)
-                loss.backward()
-                optimizer.step()
+            # 创建软标签
+            background_value = (1 - accuracy) / (num_class - 1)
+            soft_target = background_value.unsqueeze(1).expand(-1, num_class).clone()
+            soft_target.scatter_(1, target.unsqueeze(1), accuracy.unsqueeze(1))
 
-                if batch_idx % 100 == 0:
-                    print(
-                        f"Train Epoch: {epoch+1}/{total_epochs}, Batch: {batch_idx}/{len(train_loader)}, Loss: {loss.item():.4f}"
+            # 前向传播
+            logits = model(data)
+
+            loss = criterion(logits, soft_target)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            if batch_idx % 100 == 0:
+                print(
+                    f"Train Epoch: {epoch}/{total_epochs} [{batch_idx}/{len(train_loader)}] "
+                    f"Loss: {loss.item():.6f}"
+                )
+
+        train_loss /= len(train_loader)
+        print(f"Epoch {epoch} Average Training Loss: {train_loss:.6f}")
+
+        # 每5个epoch进行一次验证和保存
+        if epoch % 5 == 0:
+            model.eval()
+            val_loss = 0
+            correct = 0
+            total_accuracy_diff = 0
+            with torch.no_grad():
+                for data, target, accuracy in val_loader:
+                    data, target = data.to(device), target.to(device)
+                    accuracy = accuracy.to(device)
+
+                    # 创建软标签
+                    background_value = (1 - accuracy) / (num_class - 1)
+                    soft_target = (
+                        background_value.unsqueeze(1).expand(-1, num_class).clone()
+                    )
+                    soft_target.scatter_(1, target.unsqueeze(1), accuracy.unsqueeze(1))
+
+                    # 前向传播
+                    logits = model(data)
+
+                    # 使用相同的损失函数计算验证损失
+                    loss = criterion(logits, soft_target)
+                    val_loss += loss.item()
+
+                    # 计算分类准确率
+                    pred = logits.argmax(dim=1)
+                    correct += pred.eq(target).sum().item()
+
+                    # 计算预测准确度与真实准确度的差异
+                    pred_probs = F.softmax(logits, dim=1)
+                    pred_accuracy = pred_probs.gather(1, target.unsqueeze(1))
+                    total_accuracy_diff += (
+                        torch.abs(pred_accuracy.squeeze() - accuracy).sum().item()
                     )
 
-        # 验证阶段
-        model.eval()
-        val_loss = 0
-        correct = 0
-        with torch.no_grad():
-            for data, target in val_loader:
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                val_loss += criterion(output, target).item()
-                pred = output.argmax(dim=1, keepdim=True)
-                correct += pred.eq(target.view_as(pred)).sum().item()
+            val_loss /= len(val_loader)
+            accuracy = correct / len(val_loader.dataset)
+            mean_accuracy_diff = total_accuracy_diff / len(val_loader.dataset)
 
-        val_loss /= len(val_loader)
-        accuracy = correct / len(val_loader.dataset)
-        print(f"Validation Loss: {val_loss:.4f}, Accuracy: {accuracy:.4f}")
+            print(
+                f"Validation Loss: {val_loss:.4f}, "
+                f"Classification Accuracy: {accuracy:.4f}, "
+                f"Mean Accuracy Difference: {mean_accuracy_diff:.4f}"
+            )
 
-        # 保存检查点
-        if (epoch + 1) % 5 == 0:
+            # 保存检查点
             checkpoint_path = os.path.join(
-                args.work_dir, f"checkpoint_epoch_{epoch+1}.pth"
+                args.work_dir, f"checkpoint_epoch_{epoch}.pth"
             )
             torch.save(
                 {

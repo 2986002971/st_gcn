@@ -1,10 +1,10 @@
 from pathlib import Path
 from typing import Optional
 
-from data_process.estimate_pose import PoseEstimator
-from data_process.kinetics_gendata import KineticsDataProcessor
-from data_process.label_generator import LabelGenerator
-from data_process.split import DatasetSplitter
+from utils_data_process.estimate_pose import PoseEstimator
+from utils_data_process.kinetics_gendata import KineticsDataProcessor
+from utils_data_process.label_generator import LabelGenerator
+from utils_data_process.split import DatasetSplitter
 
 
 class DataProcessor:

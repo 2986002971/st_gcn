@@ -71,13 +71,18 @@ class LabelGenerator:
                 for frame in json_data["data"]
             )
 
-            # 从文件名中提取标签
-            label = os.path.basename(file_path).split("_")[0]
+            # 从文件名中提取标签和准确度
+            filename = os.path.basename(file_path)
+            # 使用正确的分割方式解析文件名
+            parts = filename.split("_")
+            label = parts[0]  # 获取类别标签
+            accuracy = float(parts[2].split(".json")[0])  # 正确提取标准度
 
             return {
                 "has_skeleton": has_skeleton,
                 "label": label,
                 "label_index": self.label_index_mapping.get(label, -1),
+                "accuracy": accuracy,
             }
 
     def _combine_json_files(self, folder_path: str, output_filename: str) -> None:
@@ -94,7 +99,8 @@ class LabelGenerator:
             if filename.endswith(".json"):
                 json_file_path = os.path.join(folder_path, filename)
                 entry = self._process_json_file(json_file_path)
-                data[filename.split(".")[0]] = entry
+                file_key = filename.rsplit(".json", 1)[0]
+                data[file_key] = entry
 
         output_path = os.path.join(self.output_path, output_filename)
         with open(output_path, "w") as output_json_file:

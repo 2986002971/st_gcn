@@ -63,15 +63,21 @@ class KineticsDataset(Dataset):
             label_info = json.load(f)
 
         # 处理标签
-        sample_ids = [name.split(".")[0] for name in self.sample_names]
+        # 使用完整文件名（不带.json）作为键
+        sample_ids = [name.rsplit(".json", 1)[0] for name in self.sample_names]
+
         self.labels = np.array([label_info[id]["label_index"] for id in sample_ids])
+        self.accuracies = np.array([label_info[id]["accuracy"] for id in sample_ids])
         has_skeleton = np.array([label_info[id]["has_skeleton"] for id in sample_ids])
 
         # 过滤空样本
         if self.ignore_empty:
-            valid_samples = [s for h, s in zip(has_skeleton, self.sample_names) if h]
-            self.sample_names = valid_samples
-            self.labels = self.labels[has_skeleton]
+            valid_indices = has_skeleton
+            self.sample_names = [
+                s for h, s in zip(has_skeleton, self.sample_names) if h
+            ]
+            self.labels = self.labels[valid_indices]
+            self.accuracies = self.accuracies[valid_indices]
 
         self.num_samples = len(self.sample_names)
 
@@ -79,7 +85,7 @@ class KineticsDataset(Dataset):
         """返回数据集大小"""
         return self.num_samples
 
-    def __getitem__(self, index: int) -> Tuple[np.ndarray, int]:
+    def __getitem__(self, index: int) -> Tuple[np.ndarray, int, float]:  # 修改返回类型
         """获取单个样本数据"""
         # 加载数据
         sample_path = self.data_path / self.sample_names[index]
@@ -110,6 +116,7 @@ class KineticsDataset(Dataset):
 
         # 验证标签
         label = int(video_info["label_index"])
+        accuracy = self.accuracies[index]  # 获取准确度
         assert self.labels[index] == label
 
         # 按置信度排序
@@ -120,7 +127,7 @@ class KineticsDataset(Dataset):
         # 选择指定数量的人
         data = data[:, :, :, : self.num_person_out]
 
-        return data, label
+        return data, label, accuracy  # 返回数据、标签和准确度
 
 
 class KineticsDataProcessor:
@@ -179,14 +186,18 @@ class KineticsDataProcessor:
 
         # 处理数据
         sample_labels = []
+        sample_accuracies = []  # 添加准确度列表
         for i in tqdm(range(len(dataset)), desc=f"Processing {split} data"):
-            data, label = dataset[i]
+            data, label, accuracy = dataset[i]  # 获取数据、标签和准确度
             fp[i, :, : data.shape[1], :, :] = data
             sample_labels.append(label)
+            sample_accuracies.append(accuracy)  # 保存准确度
 
-        # 保存标签
+        # 保存标签和准确度
         with open(label_out_path, "wb") as f:
-            pickle.dump((dataset.sample_names, sample_labels), f)
+            pickle.dump(
+                (dataset.sample_names, sample_labels, sample_accuracies), f
+            )  # 添加准确度
 
         print(f"{split} 数据处理完成")
 

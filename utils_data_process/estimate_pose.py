@@ -18,7 +18,7 @@ class PoseEstimator:
         姿态估计器初始化
 
         Args:
-            model_path: 模型路径，默认为None时会在当前目录查找模型文件
+            model_path: 模型路径, 默认为None时会在当前目录查找模型文件
             dataset_path: 数据集路径，默认为 "./dataset"
             output_dir: 输出目录，默认为 "./processed/json"
         """
@@ -26,7 +26,7 @@ class PoseEstimator:
         self.output_dir = Path(output_dir)
 
         if model_path is None:
-            model_path = Path(__file__).parent / "yolov8n-pose.pt"
+            model_path = Path(__file__).parent / "yolov8s-pose.pt"
         self.model = YOLO(str(model_path))
 
     @staticmethod
@@ -112,6 +112,10 @@ class PoseEstimator:
         Returns:
             Dict: 处理结果
         """
+        # 从文件名中提取准确度
+        video_name = Path(video_path).stem
+        accuracy = float(video_name.split("_")[1]) if "_" in video_name else 0.0
+
         cap, rate, frame_number, duration = self._input_reader(video_path)
         frame_index = 0
         jsdata = []
@@ -152,7 +156,12 @@ class PoseEstimator:
             jsdata.append(frame_data)
 
         cap.release()
-        return {"data": jsdata, "label": class_name, "label_index": label_index}
+        return {
+            "data": jsdata,
+            "label": class_name,
+            "label_index": label_index,
+            "accuracy": accuracy,  # 添加准确度信息
+        }
 
     def process_dataset(self) -> None:
         """处理整个数据集"""
