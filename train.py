@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
-from st_gcn import ST_GCN_18
+from model_def.st_gcn import ST_GCN_18
 
 
 def parse_args():
@@ -17,12 +17,14 @@ def parse_args():
     parser.add_argument(
         "--work_dir",
         type=str,
-        default="..",
+        default="./model_def",
         help="工作目录",
     )
     parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
     parser.add_argument("--resume_from", type=str, help="恢复训练的检查点文件")
-    parser.add_argument("--data_dir", type=str, default="..", help="数据集文件夹路径")
+    parser.add_argument(
+        "--data_dir", type=str, default="./processed", help="数据集文件夹路径"
+    )
     return parser.parse_args()
 
 
@@ -181,7 +183,7 @@ def train(args):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(
         model.parameters(),
-        lr=0.001,  # 使用 Adam 优化器，学习率设置为 0.001
+        lr=0.001,
     )
 
     # 恢复训练
