@@ -201,6 +201,53 @@ class KineticsDataProcessor:
 
         print(f"{split} 数据处理完成")
 
+    def json_to_data(self, json_data: dict) -> np.ndarray:
+        """
+        将JSON数据转换为模型输入格式的数据
+
+        Args:
+            json_data: 包含骨架数据的字典
+
+        Returns:
+            np.ndarray: 形状为(C, T, V, M)的数据数组
+        """
+        # 初始化数据数组
+        data = np.zeros(
+            (
+                3,
+                self.max_frames,
+                17,
+                self.num_person_in,
+            )  # channels, frames, joints, persons
+        )
+
+        # 填充数据
+        for frame_info in json_data["data"]:
+            frame_idx = frame_info["frame_index"]
+            for m, skeleton_info in enumerate(frame_info["skeleton"]):
+                if m >= self.num_person_in:
+                    break
+                pose = skeleton_info["pose"]
+                score = skeleton_info["score"]
+                data[0, frame_idx, :, m] = pose[0::2]  # x坐标
+                data[1, frame_idx, :, m] = pose[1::2]  # y坐标
+                data[2, frame_idx, :, m] = score  # 置信度
+
+        # 数据归一化
+        data[0:2] = data[0:2] - 0.5
+        data[0][data[2] == 0] = 0
+        data[1][data[2] == 0] = 0
+
+        # 按置信度排序
+        sort_idx = (-data[2, :, :, :].sum(axis=1)).argsort(axis=1)
+        for t, s in enumerate(sort_idx):
+            data[:, t, :, :] = data[:, t, :, s].transpose((1, 2, 0))
+
+        # 选择指定数量的人
+        data = data[:, :, :, : self.num_person_out]
+
+        return data
+
 
 if __name__ == "__main__":
     processor = KineticsDataProcessor()

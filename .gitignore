@@ -8,3 +8,4 @@
 *.npy
 *.json
 *.pyc
+*.csv
