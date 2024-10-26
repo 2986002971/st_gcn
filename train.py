@@ -209,9 +209,9 @@ def evaluate(model, val_loader, criterion, device):
             total_loss += loss.item()
 
             # 计算分类准确率
-            pred = quality_out.argmax(dim=1)
+            pred = quality_out.max(dim=1)[1]  # 对每个原始样本取14个版本中的最大值
             correct += pred.eq(target).sum().item()
-            total += target.size(0)
+            total += B
 
             # 计算质量评估损失
             correct_mask = pred.eq(target)
@@ -293,9 +293,9 @@ def train(args):
             total_loss += loss.item()
 
             # 统计
-            pred = quality_out.argmax(dim=1)
+            pred = quality_out.max(dim=1)[1]  # 对每个原始样本取14个版本中的最大值
             correct_samples += pred.eq(target).sum().item()
-            total_samples += target.size(0)
+            total_samples += B
 
             if batch_idx % 100 == 0:
                 print(
