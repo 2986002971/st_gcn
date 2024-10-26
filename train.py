@@ -6,8 +6,6 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 
 from model_def.st_gcn import ST_GCN_18
@@ -21,7 +19,7 @@ def parse_args():
         default="./model_def",
         help="工作目录",
     )
-    parser.add_argument("--batch_size", type=int, default=2, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
     parser.add_argument("--resume_from", type=str, help="恢复训练的检查点文件")
     parser.add_argument(
         "--data_dir", type=str, default="./processed", help="数据集文件夹路径"
@@ -194,21 +192,23 @@ def evaluate(model, val_loader, criterion, device):
             B, N, C, T, V, M = data.shape
             data = data.view(B * N, C, T, V, M)
 
-            with autocast(device_type="cuda", dtype=torch.float16):
-                quality_out = model(data)
-                quality_out = quality_out.view(B, N)
+            quality_out = model(data)
+            quality_out = quality_out.view(B, N)
 
-                # 创建标签掩码
-                label_mask = torch.zeros_like(quality_out)
-                label_mask[torch.arange(B), target] = 1
+            # 创建目标矩阵
+            target_matrix = torch.zeros_like(quality_out)
+            target_matrix[torch.arange(B), target] = accuracy
 
-                # 计算损失 (使用 float() 确保 FP32 精度)
-                loss = criterion(
-                    quality_out.float() * label_mask,
-                    accuracy.unsqueeze(1).repeat(1, N).float() * label_mask,
-                )
+            # 计算损失
+            loss = criterion(quality_out, target_matrix)
 
-            total_loss += loss.item()
+            # 对正确类别的损失赋予更高的权重
+            weight_matrix = torch.ones_like(loss)
+            weight_matrix[torch.arange(B), target] = 10  # 可以调整这个权重
+
+            weighted_loss = (loss * weight_matrix).mean()
+
+            total_loss += weighted_loss.item()
 
             # 计算分类准确率
             pred = quality_out.max(dim=1)[1]
@@ -216,16 +216,13 @@ def evaluate(model, val_loader, criterion, device):
             total += B
 
             # 计算质量评估损失
-            correct_mask = pred.eq(target)
-            if correct_mask.any():
-                quality_loss += criterion(
-                    quality_out[correct_mask, target[correct_mask]].float(),
-                    accuracy[correct_mask].float(),
-                ).item()
+            quality_loss += (
+                criterion(quality_out[torch.arange(B), target], accuracy).mean().item()
+            )
 
     avg_loss = total_loss / len(val_loader)
     accuracy = correct / total
-    avg_quality_loss = quality_loss / correct if correct > 0 else float("inf")
+    avg_quality_loss = quality_loss / len(val_loader)
 
     return avg_loss, accuracy, avg_quality_loss
 
@@ -241,14 +238,8 @@ def train(args):
         graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
     ).to(device)
 
-    # 保持 BatchNorm 层为 FP32
-    for m in model.modules():
-        if isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.BatchNorm2d):
-            m.float()
-
-    criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    scaler = GradScaler(device="cuda")
+    criterion = nn.MSELoss(reduction="none")
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     train_loader = get_dataloader(
         os.path.join(args.data_dir, "train_data.npy"),
@@ -279,29 +270,29 @@ def train(args):
 
             optimizer.zero_grad()
 
-            # 重塑数据
             B, N, C, T, V, M = data.shape
             data = data.view(B * N, C, T, V, M)
 
-            with autocast(device_type="cuda", dtype=torch.float16):
-                quality_out = model(data)
-                quality_out = quality_out.view(B, N)
+            quality_out = model(data)
+            quality_out = quality_out.view(B, N)
 
-                # 创建标签掩码
-                label_mask = torch.zeros_like(quality_out)
-                label_mask[torch.arange(B), target] = 1
+            # 创建目标矩阵
+            target_matrix = torch.zeros_like(quality_out)
+            target_matrix[torch.arange(B), target] = accuracy
 
-                # 计算损失 (使用 float() 确保 FP32 精度)
-                loss = criterion(
-                    quality_out.float() * label_mask,
-                    accuracy.unsqueeze(1).repeat(1, N).float() * label_mask,
-                )
+            # 计算损失
+            loss = criterion(quality_out, target_matrix)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            # 对正确类别的损失赋予更高的权重
+            weight_matrix = torch.ones_like(loss)
+            weight_matrix[torch.arange(B), target] = 10  # 可以调整这个权重
 
-            total_loss += loss.item()
+            weighted_loss = (loss * weight_matrix).mean()
+
+            weighted_loss.backward()
+            optimizer.step()
+
+            total_loss += weighted_loss.item()
 
             # 统计
             pred = quality_out.max(dim=1)[1]
@@ -310,7 +301,7 @@ def train(args):
 
             if batch_idx % 100 == 0:
                 print(
-                    f"Epoch {epoch} - Batch {batch_idx}: Loss: {total_loss/(batch_idx+1):.6f}, Accuracy: {correct_samples/total_samples:.4f}"
+                    f"Epoch {epoch} - Batch {batch_idx}: Loss: {total_loss/(batch_idx+1):.4f}, Accuracy: {correct_samples/total_samples:.4f}"
                 )
 
         # 每5个epoch进行一次验证
