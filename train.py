@@ -110,12 +110,14 @@ class SkeletonFeeder(Dataset):
         self,
         data_path,
         label_path,
+        standard_data_path="./processed_standard/train_data.npy",
         random_choose=False,
         random_move=False,
         window_size=-1,
     ):
         self.data_path = data_path
         self.label_path = label_path
+        self.standard_data_path = standard_data_path
         self.random_choose = random_choose
         self.random_move = random_move
         self.window_size = window_size
@@ -123,10 +125,15 @@ class SkeletonFeeder(Dataset):
         self.load_data()
 
     def load_data(self):
+        # 加载原始数据
         with open(self.data_path, "rb") as f:
             self.data = np.load(f, allow_pickle=True)
         with open(self.label_path, "rb") as f:
-            self.sample_name, self.label, self.accuracy = pickle.load(f)  # 加载准确度
+            self.sample_name, self.label, self.accuracy = pickle.load(f)
+
+        # 加载标准视频数据
+        self.standard_data = np.load(self.standard_data_path, allow_pickle=True)
+        print(f"标准视频数据形状: {self.standard_data.shape}")  # 应该是(14, C, T, V, M)
 
         # 确保标签和准确度是正确的数据类型
         self.label = np.array(self.label, dtype=np.int64)
@@ -136,19 +143,40 @@ class SkeletonFeeder(Dataset):
         return len(self.label)
 
     def __getitem__(self, index):
+        # 获取原始数据
         data_numpy = self.data[index]
         label = self.label[index]
-        accuracy = self.accuracy[index]  # 获取准确度
+        accuracy = self.accuracy[index]
 
+        # 数据增强
         if self.random_choose:
             data_numpy = random_choose(data_numpy, self.window_size)
         if self.random_move:
             data_numpy = random_move(data_numpy)
 
+        # 处理标准视频数据
+        processed_standard_data = []
+        for i in range(len(self.standard_data)):
+            std_data = self.standard_data[i].copy()  # 复制以避免修改原始数据
+            if self.random_choose:
+                # 对标准视频使用相同的window_size
+                std_data = random_choose(std_data, self.window_size, auto_pad=True)
+            if self.random_move:
+                std_data = random_move(std_data)
+            processed_standard_data.append(std_data)
+
+        # 合并所有标准视频数据
+        # 原始数据: (C, T, V, M)
+        # 标准数据: (14, C, T, V, M) -> 在通道维度上合并
+        combined_data = np.concatenate(
+            [data_numpy] + processed_standard_data,
+            axis=0,
+        )
+
         return (
-            torch.FloatTensor(data_numpy),
+            torch.FloatTensor(combined_data),
             torch.LongTensor([label]).squeeze(),
-            torch.FloatTensor([accuracy]).squeeze(),  # 返回准确度
+            torch.FloatTensor([accuracy]).squeeze(),
         )
 
 
@@ -169,7 +197,7 @@ def train(args):
         args.batch_size,
         random_choose=True,
         random_move=True,
-        window_size=150,
+        window_size=600,
     )
     val_loader = get_dataloader(
         os.path.join(args.data_dir, "val_data.npy"),
@@ -181,7 +209,7 @@ def train(args):
     num_class = 14  # 定义类别数
     graph_cfg = {"layout": "coco", "strategy": "spatial", "max_hop": 2}
     model = ST_GCN_18(
-        in_channels=3,
+        in_channels=45,  # 修改为45 = 3*(1+14)，原始数据3通道 + 14个标准视频各3通道
         num_class=num_class,
         edge_importance_weighting=True,
         graph_cfg=graph_cfg,

@@ -1,29 +1,21 @@
 from pathlib import Path
 from typing import Optional
 
-from utils_data_process.estimate_pose import PoseEstimator
-from utils_data_process.kinetics_gendata import KineticsDataProcessor
-from utils_data_process.label_generator import LabelGenerator
-from utils_data_process.split import DatasetSplitter
+from estimate_pose import PoseEstimator
+from kinetics_gendata import KineticsDataProcessor
+from label_generator import LabelGenerator
+from split import DatasetSplitter
 
 
-class DataProcessor:
-    """数据处理流水线"""
+class StandardDataProcessor:
+    """标准视频数据处理流水线"""
 
     def __init__(
         self,
-        dataset_path: str = "./dataset",
-        processed_path: str = "./processed",
+        dataset_path: str = "./standard",  # 标准视频目录
+        processed_path: str = "./processed_standard",  # 标准视频处理结果目录
         model_path: Optional[str] = None,
     ):
-        """
-        初始化数据处理器
-
-        Args:
-            dataset_path: 原始数据集路径
-            processed_path: 处理后数据保存路径
-            model_path: YOLOv8模型路径，默认None会使用默认模型
-        """
         self.dataset_path = Path(dataset_path)
         self.processed_path = Path(processed_path)
         self.model_path = model_path
@@ -42,11 +34,11 @@ class DataProcessor:
             path.mkdir(parents=True, exist_ok=True)
 
     def process(self) -> None:
-        """执行完整的数据处理流程"""
-        print("=== 开始数据处理流水线 ===")
+        """执行完整的标准视频处理流程"""
+        print("=== 开始标准视频处理流水线 ===")
 
         # 1. 视频处理：生成骨架JSON文件
-        print("\n1. 处理视频生成骨架数据...")
+        print("\n1. 处理标准视频生成骨架数据...")
         pose_estimator = PoseEstimator(
             model_path=self.model_path,
             dataset_path=self.dataset_path,
@@ -54,12 +46,13 @@ class DataProcessor:
         )
         pose_estimator.process_dataset()
 
-        # 2. 数据集分割：分割训练集和验证集
-        print("\n2. 分割数据集...")
+        # 2. 数据集分割：全部作为训练集
+        print("\n2. 分配数据集...")
         splitter = DatasetSplitter(
             data_root=self.json_path,
             train_folder=self.train_path,
             test_folder=self.val_path,
+            split_ratio=1.0,  # 关键修改：将所有数据分配到训练集
         )
         splitter.split()
 
@@ -73,14 +66,18 @@ class DataProcessor:
         label_generator.generate()
 
         # 4. 生成最终的NPY文件
-        print("\n4. 生成NPY训练文件...")
-        data_processor = KineticsDataProcessor(data_root=self.processed_path)
+        print("\n4. 生成NPY标准文件...")
+        data_processor = KineticsDataProcessor(
+            data_root=self.processed_path,
+            num_person_in=2,  # 可以根据需要调整
+            num_person_out=1,
+        )
         data_processor.process()
 
-        print("\n=== 数据处理流水线完成 ===")
+        print("\n=== 标准视频处理流水线完成 ===")
         print(f"处理后的文件保存在: {self.processed_path}")
 
 
 if __name__ == "__main__":
-    processor = DataProcessor()
+    processor = StandardDataProcessor()
     processor.process()
