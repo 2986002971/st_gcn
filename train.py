@@ -20,7 +20,7 @@ def parse_args():
         default="./model_def",
         help="工作目录",
     )
-    parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=2, help="批次大小")
     parser.add_argument("--resume_from", type=str, help="恢复训练的检查点文件")
     parser.add_argument(
         "--data_dir", type=str, default="./processed", help="数据集文件夹路径"
@@ -146,7 +146,7 @@ class SkeletonFeeder(Dataset):
     def __getitem__(self, index):
         data_numpy = self.data[index]
         label = self.label[index]
-        accuracy = self.accuracy[index]
+        accuracy = self.accuracy[index] * 100  # 将accuracy乘以100
 
         # 准备14个版本的数据，每个都与一个标准视频结合
         combined_data = []
@@ -187,10 +187,9 @@ def evaluate(model, val_loader, criterion, device):
 
     with torch.no_grad():
         for data, target, accuracy, _ in val_loader:
-            data, target = data.to(device), target.to(device)
-            accuracy = accuracy.to(device)
+            data, target = data.to(device).half(), target.to(device)  # 添加 .half()
+            accuracy = accuracy.to(device).half()  # 添加 .half()
 
-            # 重塑数据
             B, N, C, T, V, M = data.shape
             data = data.view(B * N, C, T, V, M)
 
@@ -209,7 +208,7 @@ def evaluate(model, val_loader, criterion, device):
             total_loss += loss.item()
 
             # 计算分类准确率
-            pred = quality_out.max(dim=1)[1]  # 对每个原始样本取14个版本中的最大值
+            pred = quality_out.max(dim=1)[1]
             correct += pred.eq(target).sum().item()
             total += B
 
@@ -232,12 +231,16 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 模型定义
-    model = ST_GCN_18(
-        in_channels=6,
-        num_class=14,
-        edge_importance_weighting=True,
-        graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
-    ).to(device)
+    model = (
+        ST_GCN_18(
+            in_channels=6,
+            num_class=14,
+            edge_importance_weighting=True,
+            graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
+        )
+        .to(device)
+        .half()
+    )  # 添加 .half()
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
@@ -266,8 +269,8 @@ def train(args):
         total_samples = 0
 
         for batch_idx, (data, target, accuracy, indices) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
-            accuracy = accuracy.to(device)
+            data, target = data.to(device).half(), target.to(device)  # 添加 .half()
+            accuracy = accuracy.to(device).half()  # 添加 .half()
 
             optimizer.zero_grad()
 
@@ -287,19 +290,20 @@ def train(args):
                 quality_out * label_mask,
                 accuracy.unsqueeze(1).repeat(1, N) * label_mask,
             )
+
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
 
             # 统计
-            pred = quality_out.max(dim=1)[1]  # 对每个原始样本取14个版本中的最大值
+            pred = quality_out.max(dim=1)[1]
             correct_samples += pred.eq(target).sum().item()
             total_samples += B
 
             if batch_idx % 100 == 0:
                 print(
-                    f"Epoch {epoch} - Batch {batch_idx}: Loss: {total_loss/(batch_idx+1):.4f}, Accuracy: {correct_samples/total_samples:.4f}"
+                    f"Epoch {epoch} - Batch {batch_idx}: Loss: {total_loss/(batch_idx+1):.6f}, Accuracy: {correct_samples/total_samples:.4f}"
                 )
 
         # 每5个epoch进行一次验证
