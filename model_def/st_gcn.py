@@ -374,11 +374,10 @@ class ST_GCN_18(nn.Module):
         else:
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
-        # 双头输出
-        self.fcn_cls = nn.Conv2d(256, num_class, kernel_size=1)  # 分类头
+        # 只保留标准度输出头
         self.fcn_quality = nn.Conv2d(256, 1, kernel_size=1)  # 标准度头
 
-    def forward(self, x, output_quality=False):
+    def forward(self, x):
         # data normalization
         N, C, T, V, M = x.size()
         x = x.permute(0, 4, 3, 1, 2).contiguous()
@@ -396,15 +395,9 @@ class ST_GCN_18(nn.Module):
         x = F.avg_pool2d(x, x.size()[2:])
         x = x.view(N, M, -1, 1, 1).mean(dim=1)
 
-        # 分类输出
-        cls_out = self.fcn_cls(x).view(x.size(0), -1)
-
-        if output_quality:
-            # 标准度输出
-            quality_out = self.fcn_quality(x).view(x.size(0), -1).squeeze(1)
-            return cls_out, quality_out
-
-        return cls_out
+        # 标准度输出
+        quality_out = self.fcn_quality(x).view(x.size(0), -1).squeeze(1)
+        return quality_out
 
     def extract_feature(self, x):
         # data normalization
@@ -424,7 +417,7 @@ class ST_GCN_18(nn.Module):
         feature = x.view(N, M, c, t, v).permute(0, 2, 3, 4, 1)
 
         # prediction
-        x = self.fcn_cls(x)
+        x = self.fcn_quality(x)
         output = x.view(N, M, -1, t, v).permute(0, 2, 3, 4, 1)
 
         return output, feature

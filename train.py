@@ -20,7 +20,7 @@ def parse_args():
         default="./model_def",
         help="工作目录",
     )
-    parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
+    parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
     parser.add_argument("--resume_from", type=str, help="恢复训练的检查点文件")
     parser.add_argument(
         "--data_dir", type=str, default="./processed", help="数据集文件夹路径"
@@ -135,7 +135,6 @@ class SkeletonFeeder(Dataset):
 
         # 加载标准视频数据
         self.standard_data = np.load(self.standard_data_path, allow_pickle=True)
-        print(f"标准视频数据形状: {self.standard_data.shape}")
 
         # 确保标签和准确度是正确的数据类型
         self.label = np.array(self.label, dtype=np.int64)
@@ -144,38 +143,25 @@ class SkeletonFeeder(Dataset):
     def __len__(self):
         return len(self.label)
 
-    def get_phase2_data(self, index, pred_label):
-        """获取第二阶段的数据（包含标准视频）"""
-        data_numpy = self.data[index]
-        if self.random_choose:
-            data_numpy = random_choose(data_numpy, self.window_size, auto_pad=True)
-        if self.random_move:
-            data_numpy = random_move(data_numpy)
-
-        # 获取对应预测标签的标准视频
-        std_data = self.standard_data[pred_label]
-        if self.random_choose:
-            std_data = random_choose(std_data, self.window_size, auto_pad=True)
-        if self.random_move:
-            std_data = random_move(std_data)
-
-        combined_data = np.concatenate([data_numpy, std_data], axis=0)
-        return torch.FloatTensor(combined_data)
-
     def __getitem__(self, index):
-        """获取第一阶段的数据（不包含标准视频）"""
         data_numpy = self.data[index]
         label = self.label[index]
         accuracy = self.accuracy[index]
 
-        if self.random_choose:
-            data_numpy = random_choose(data_numpy, self.window_size, auto_pad=True)
-        if self.random_move:
-            data_numpy = random_move(data_numpy)
+        # 准备14个版本的数据，每个都与一个标准视频结合
+        combined_data = []
+        for std_idx in range(14):
+            std_data = self.standard_data[std_idx]
+            combined = np.concatenate([data_numpy, std_data], axis=0)
 
-        # Phase 1: 原始数据加零填充
-        zero_channels = np.zeros_like(data_numpy)
-        combined_data = np.concatenate([data_numpy, zero_channels], axis=0)
+            if self.random_choose:
+                combined = random_choose(combined, self.window_size)
+            if self.random_move:
+                combined = random_move(combined)
+
+            combined_data.append(combined)
+
+        combined_data = np.stack(combined_data)  # Shape: (14, C, T, V, M)
 
         return (
             torch.FloatTensor(combined_data),
@@ -192,6 +178,56 @@ def get_dataloader(data_path, label_path, batch_size, **kwargs):
     )
 
 
+def evaluate(model, val_loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    correct = 0
+    total = 0
+    quality_loss = 0
+
+    with torch.no_grad():
+        for data, target, accuracy, _ in val_loader:
+            data, target = data.to(device), target.to(device)
+            accuracy = accuracy.to(device)
+
+            # 重塑数据
+            B, N, C, T, V, M = data.shape
+            data = data.view(B * N, C, T, V, M)
+
+            quality_out = model(data)
+            quality_out = quality_out.view(B, N)
+
+            # 创建标签掩码
+            label_mask = torch.zeros_like(quality_out)
+            label_mask[torch.arange(B), target] = 1
+
+            # 计算损失
+            loss = criterion(
+                quality_out * label_mask,
+                accuracy.unsqueeze(1).repeat(1, N) * label_mask,
+            )
+            total_loss += loss.item()
+
+            # 计算分类准确率
+            pred = quality_out.argmax(dim=1)
+            correct += pred.eq(target).sum().item()
+            total += target.size(0)
+
+            # 计算质量评估损失
+            correct_mask = pred.eq(target)
+            if correct_mask.any():
+                quality_loss += criterion(
+                    quality_out[correct_mask, target[correct_mask]],
+                    accuracy[correct_mask],
+                ).item()
+
+    avg_loss = total_loss / len(val_loader)
+    accuracy = correct / total
+    avg_quality_loss = quality_loss / correct if correct > 0 else float("inf")
+
+    return avg_loss, accuracy, avg_quality_loss
+
+
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -203,8 +239,7 @@ def train(args):
         graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
     ).to(device)
 
-    criterion_cls = nn.CrossEntropyLoss()
-    criterion_quality = nn.MSELoss()
+    criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     train_loader = get_dataloader(
@@ -226,99 +261,54 @@ def train(args):
 
     for epoch in range(args.max_epochs):
         model.train()
-        total_cls_loss = 0
-        total_quality_loss = 0
+        total_loss = 0
         correct_samples = 0
         total_samples = 0
 
         for batch_idx, (data, target, accuracy, indices) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             accuracy = accuracy.to(device)
-            indices = indices.to(device)
 
-            # Phase 1: 分类
-            optimizer.zero_grad()  # 在每个批次开始时清除梯度
-            cls_out, _ = model(data, output_quality=True)
-            cls_loss = criterion_cls(cls_out, target)
-            cls_loss.backward()  # 对所有样本进行反向传播
-            total_cls_loss += cls_loss.item()
+            optimizer.zero_grad()
 
-            pred = cls_out.argmax(dim=1)
-            correct_mask = pred.eq(target)
+            # 重塑数据
+            B, N, C, T, V, M = data.shape
+            data = data.view(B * N, C, T, V, M)
 
-            # Phase 2: 对分类正确的样本评估标准度
-            if correct_mask.any():
-                correct_indices = indices[correct_mask]
-                correct_preds = pred[correct_mask]
-                correct_accuracies = accuracy[correct_mask]
+            quality_out = model(data)
+            quality_out = quality_out.view(B, N)
 
-                phase2_data = []
-                for idx, pred_label in zip(correct_indices, correct_preds):
-                    phase2_data.append(
-                        train_loader.dataset.get_phase2_data(idx, pred_label)
-                    )
-                phase2_data = torch.stack(phase2_data).to(device)
+            # 创建标签掩码
+            label_mask = torch.zeros_like(quality_out)
+            label_mask[torch.arange(B), target] = 1
 
-                # Phase 2前向传播
-                _, phase2_quality = model(phase2_data, output_quality=True)
-
-                # 计算标准度损失
-                quality_loss = criterion_quality(
-                    phase2_quality.squeeze(), correct_accuracies
-                )
-                quality_loss.backward()  # 对正确分类的样本进行标准度损失的反向传播
-                total_quality_loss += quality_loss.item()
-
-            # 统一进行优化器步骤
+            # 计算损失
+            loss = criterion(
+                quality_out * label_mask,
+                accuracy.unsqueeze(1).repeat(1, N) * label_mask,
+            )
+            loss.backward()
             optimizer.step()
 
+            total_loss += loss.item()
+
             # 统计
-            correct_samples += correct_mask.sum().item()
+            pred = quality_out.argmax(dim=1)
+            correct_samples += pred.eq(target).sum().item()
             total_samples += target.size(0)
 
             if batch_idx % 100 == 0:
                 print(
-                    f"Epoch {epoch} - Batch {batch_idx}: "
-                    f"Classification Loss: {total_cls_loss/(batch_idx+1):.4f}, "
-                    f"Quality Loss: {total_quality_loss/(batch_idx+1):.4f}, "
-                    f"Accuracy: {correct_samples/total_samples:.4f}"
+                    f"Epoch {epoch} - Batch {batch_idx}: Loss: {total_loss/(batch_idx+1):.4f}, Accuracy: {correct_samples/total_samples:.4f}"
                 )
 
         # 每5个epoch进行一次验证
         if epoch % 5 == 0:
-            model.eval()
-            val_cls_loss = 0
-            val_quality_loss = 0
-            correct = 0
-            total = 0
-
-            with torch.no_grad():
-                for data, target, accuracy, _ in val_loader:
-                    data, target = data.to(device), target.to(device)
-                    accuracy = accuracy.to(device)
-
-                    cls_out, quality_out = model(data, output_quality=True)
-                    val_cls_loss += criterion_cls(cls_out, target).item()
-
-                    pred = cls_out.argmax(dim=1)
-                    correct_mask = pred.eq(target)
-
-                    if correct_mask.any():
-                        val_quality_loss += criterion_quality(
-                            quality_out[correct_mask].squeeze(), accuracy[correct_mask]
-                        ).item()
-
-                    correct += correct_mask.sum().item()
-                    total += target.size(0)
-
-            val_accuracy = correct / total
-            val_cls_loss /= len(val_loader)
-            val_quality_loss /= len(val_loader)
-
+            val_loss, val_accuracy, val_quality_loss = evaluate(
+                model, val_loader, criterion, device
+            )
             print(
-                f"验证 - 分类损失: {val_cls_loss:.4f}, "
-                f"质量损失: {val_quality_loss:.4f}, "
-                f"准确率: {val_accuracy:.4f}"
+                f"Epoch {epoch} - Validation: Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.4f}, Quality Loss: {val_quality_loss:.4f}"
             )
 
             # 保存最佳模型
@@ -334,6 +324,7 @@ def train(args):
                     },
                     checkpoint_path,
                 )
+                print(f"Saved best model with quality loss: {best_quality_loss:.4f}")
 
     print("Training completed!")
 
