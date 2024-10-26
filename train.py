@@ -6,7 +6,6 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
@@ -25,6 +24,10 @@ def parse_args():
     parser.add_argument("--resume_from", type=str, help="恢复训练的检查点文件")
     parser.add_argument(
         "--data_dir", type=str, default="./processed", help="数据集文件夹路径"
+    )
+    # 添加最大轮数参数
+    parser.add_argument(
+        "--max_epochs", type=int, default=500, help="每个阶段的最大训练轮数"
     )
     return parser.parse_args()
 
@@ -121,7 +124,6 @@ class SkeletonFeeder(Dataset):
         self.random_choose = random_choose
         self.random_move = random_move
         self.window_size = window_size
-
         self.load_data()
 
     def load_data(self):
@@ -133,7 +135,7 @@ class SkeletonFeeder(Dataset):
 
         # 加载标准视频数据
         self.standard_data = np.load(self.standard_data_path, allow_pickle=True)
-        print(f"标准视频数据形状: {self.standard_data.shape}")  # 应该是(14, C, T, V, M)
+        print(f"标准视频数据形状: {self.standard_data.shape}")
 
         # 确保标签和准确度是正确的数据类型
         self.label = np.array(self.label, dtype=np.int64)
@@ -142,41 +144,44 @@ class SkeletonFeeder(Dataset):
     def __len__(self):
         return len(self.label)
 
+    def get_phase2_data(self, index, pred_label):
+        """获取第二阶段的数据（包含标准视频）"""
+        data_numpy = self.data[index]
+        if self.random_choose:
+            data_numpy = random_choose(data_numpy, self.window_size, auto_pad=True)
+        if self.random_move:
+            data_numpy = random_move(data_numpy)
+
+        # 获取对应预测标签的标准视频
+        std_data = self.standard_data[pred_label]
+        if self.random_choose:
+            std_data = random_choose(std_data, self.window_size, auto_pad=True)
+        if self.random_move:
+            std_data = random_move(std_data)
+
+        combined_data = np.concatenate([data_numpy, std_data], axis=0)
+        return torch.FloatTensor(combined_data)
+
     def __getitem__(self, index):
-        # 获取原始数据
+        """获取第一阶段的数据（不包含标准视频）"""
         data_numpy = self.data[index]
         label = self.label[index]
         accuracy = self.accuracy[index]
 
-        # 数据增强
         if self.random_choose:
-            data_numpy = random_choose(data_numpy, self.window_size)
+            data_numpy = random_choose(data_numpy, self.window_size, auto_pad=True)
         if self.random_move:
             data_numpy = random_move(data_numpy)
 
-        # 处理标准视频数据
-        processed_standard_data = []
-        for i in range(len(self.standard_data)):
-            std_data = self.standard_data[i].copy()  # 复制以避免修改原始数据
-            if self.random_choose:
-                # 对标准视频使用相同的window_size
-                std_data = random_choose(std_data, self.window_size, auto_pad=True)
-            if self.random_move:
-                std_data = random_move(std_data)
-            processed_standard_data.append(std_data)
-
-        # 合并所有标准视频数据
-        # 原始数据: (C, T, V, M)
-        # 标准数据: (14, C, T, V, M) -> 在通道维度上合并
-        combined_data = np.concatenate(
-            [data_numpy] + processed_standard_data,
-            axis=0,
-        )
+        # Phase 1: 原始数据加零填充
+        zero_channels = np.zeros_like(data_numpy)
+        combined_data = np.concatenate([data_numpy, zero_channels], axis=0)
 
         return (
             torch.FloatTensor(combined_data),
             torch.LongTensor([label]).squeeze(),
             torch.FloatTensor([accuracy]).squeeze(),
+            torch.LongTensor([index]),
         )
 
 
@@ -190,7 +195,18 @@ def get_dataloader(data_path, label_path, batch_size, **kwargs):
 def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 数据加载
+    # 模型定义
+    model = ST_GCN_18(
+        in_channels=6,
+        num_class=14,
+        edge_importance_weighting=True,
+        graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
+    ).to(device)
+
+    criterion_cls = nn.CrossEntropyLoss()
+    criterion_quality = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
     train_loader = get_dataloader(
         os.path.join(args.data_dir, "train_data.npy"),
         os.path.join(args.data_dir, "train_label.pkl"),
@@ -199,132 +215,128 @@ def train(args):
         random_move=True,
         window_size=600,
     )
+
     val_loader = get_dataloader(
         os.path.join(args.data_dir, "val_data.npy"),
         os.path.join(args.data_dir, "val_label.pkl"),
         args.batch_size,
     )
 
-    # 模型定义
-    num_class = 14  # 定义类别数
-    graph_cfg = {"layout": "coco", "strategy": "spatial", "max_hop": 2}
-    model = ST_GCN_18(
-        in_channels=45,  # 修改为45 = 3*(1+14)，原始数据3通道 + 14个标准视频各3通道
-        num_class=num_class,
-        edge_importance_weighting=True,
-        graph_cfg=graph_cfg,
-    ).to(device)
+    best_quality_loss = float("inf")
 
-    # 损失函数和优化器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=0.001,
-    )
-
-    # 恢复训练
-    start_epoch = 0
-    if args.resume_from:
-        checkpoint = torch.load(args.resume_from)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint["epoch"]
-        print(f"Resuming from epoch {start_epoch}")
-
-    # 训练循环
-    total_epochs = 500
-    for epoch in range(start_epoch, total_epochs):
+    for epoch in range(args.max_epochs):
         model.train()
-        train_loss = 0
-        for batch_idx, (data, target, accuracy) in enumerate(train_loader):
+        total_cls_loss = 0
+        total_quality_loss = 0
+        correct_samples = 0
+        total_samples = 0
+
+        for batch_idx, (data, target, accuracy, indices) in enumerate(train_loader):
             data, target = data.to(device), target.to(device)
             accuracy = accuracy.to(device)
+            indices = indices.to(device)  # 将indices也移到相同的设备上
 
-            # 创建软标签
-            background_value = (1 - accuracy) / (num_class - 1)
-            soft_target = background_value.unsqueeze(1).expand(-1, num_class).clone()
-            soft_target.scatter_(1, target.unsqueeze(1), accuracy.unsqueeze(1))
-
-            # 前向传播
-            logits = model(data)
-
-            loss = criterion(logits, soft_target)
-
+            # Phase 1: 分类
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            cls_out, quality_out = model(data, output_quality=True)
+            pred = cls_out.argmax(dim=1)
+            correct_mask = pred.eq(target)
 
-            train_loss += loss.item()
+            # 对分类错误的样本进行分类损失的反向传播
+            if (~correct_mask).any():
+                cls_loss = criterion_cls(cls_out[~correct_mask], target[~correct_mask])
+                cls_loss.backward()
+                total_cls_loss += cls_loss.item()
+                optimizer.step()
+
+            # Phase 2: 对分类正确的样本评估标准度
+            if correct_mask.any():
+                # 获取分类正确的样本索引
+                correct_indices = indices[correct_mask]
+                correct_preds = pred[correct_mask]
+                correct_accuracies = accuracy[correct_mask]
+
+                # 为每个正确分类的样本获取Phase 2数据
+                phase2_data = []
+                for idx, pred_label in zip(correct_indices, correct_preds):
+                    phase2_data.append(
+                        train_loader.dataset.get_phase2_data(idx, pred_label)
+                    )
+                phase2_data = torch.stack(phase2_data).to(device)
+
+                # Phase 2前向传播
+                optimizer.zero_grad()
+                _, phase2_quality = model(phase2_data, output_quality=True)
+
+                # 计算标准度损失并反向传播
+                quality_loss = criterion_quality(phase2_quality, correct_accuracies)
+                quality_loss.backward()
+                total_quality_loss += quality_loss.item()
+                optimizer.step()
+
+            # 统计
+            correct_samples += correct_mask.sum().item()
+            total_samples += target.size(0)
+
             if batch_idx % 100 == 0:
                 print(
-                    f"Train Epoch: {epoch}/{total_epochs} [{batch_idx}/{len(train_loader)}] "
-                    f"Loss: {loss.item():.6f}"
+                    f"Epoch {epoch} - Batch {batch_idx}: "
+                    f"Classification Loss: {total_cls_loss/(batch_idx+1):.4f}, "
+                    f"Quality Loss: {total_quality_loss/(batch_idx+1):.4f}, "
+                    f"Accuracy: {correct_samples/total_samples:.4f}"
                 )
 
-        train_loss /= len(train_loader)
-        print(f"Epoch {epoch} Average Training Loss: {train_loss:.6f}")
+        # 验证部分保持不变
+        model.eval()
+        val_cls_loss = 0
+        val_quality_loss = 0
+        correct = 0
+        total = 0
 
-        # 每5个epoch进行一次验证和保存
-        if epoch % 5 == 0:
-            model.eval()
-            val_loss = 0
-            correct = 0
-            total_accuracy_diff = 0
-            with torch.no_grad():
-                for data, target, accuracy in val_loader:
-                    data, target = data.to(device), target.to(device)
-                    accuracy = accuracy.to(device)
+        with torch.no_grad():
+            for data, target, accuracy, _ in val_loader:
+                data, target = data.to(device), target.to(device)
+                accuracy = accuracy.to(device)
 
-                    # 创建软标签
-                    background_value = (1 - accuracy) / (num_class - 1)
-                    soft_target = (
-                        background_value.unsqueeze(1).expand(-1, num_class).clone()
-                    )
-                    soft_target.scatter_(1, target.unsqueeze(1), accuracy.unsqueeze(1))
+                cls_out, quality_out = model(data, output_quality=True)
+                val_cls_loss += criterion_cls(cls_out, target).item()
 
-                    # 前向传播
-                    logits = model(data)
+                pred = cls_out.argmax(dim=1)
+                correct_mask = pred.eq(target)
 
-                    # 使用相同的损失函数计算验证损失
-                    loss = criterion(logits, soft_target)
-                    val_loss += loss.item()
+                if correct_mask.any():
+                    val_quality_loss += criterion_quality(
+                        quality_out[correct_mask].squeeze(), accuracy[correct_mask]
+                    ).item()
 
-                    # 计算分类准确率
-                    pred = logits.argmax(dim=1)
-                    correct += pred.eq(target).sum().item()
+                correct += correct_mask.sum().item()
+                total += target.size(0)
 
-                    # 计算预测准确度与真实准确度的差异
-                    pred_probs = F.softmax(logits, dim=1)
-                    pred_accuracy = pred_probs.gather(1, target.unsqueeze(1))
-                    total_accuracy_diff += (
-                        torch.abs(pred_accuracy.squeeze() - accuracy).sum().item()
-                    )
+        val_accuracy = correct / total
+        val_cls_loss /= len(val_loader)
+        val_quality_loss /= len(val_loader)
 
-            val_loss /= len(val_loader)
-            accuracy = correct / len(val_loader.dataset)
-            mean_accuracy_diff = total_accuracy_diff / len(val_loader.dataset)
+        print(
+            f"Validation - Classification Loss: {val_cls_loss:.4f}, "
+            f"Quality Loss: {val_quality_loss:.4f}, "
+            f"Accuracy: {val_accuracy:.4f}"
+        )
 
-            print(
-                f"Validation Loss: {val_loss:.4f}, "
-                f"Classification Accuracy: {accuracy:.4f}, "
-                f"Mean Accuracy Difference: {mean_accuracy_diff:.4f}"
-            )
-
-            # 保存检查点
-            checkpoint_path = os.path.join(
-                args.work_dir, f"checkpoint_epoch_{epoch}.pth"
-            )
+        # 保存最佳模型
+        if val_quality_loss < best_quality_loss:
+            best_quality_loss = val_quality_loss
+            checkpoint_path = os.path.join(args.work_dir, "best_model.pth")
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "loss": loss,
+                    "best_quality_loss": best_quality_loss,
                 },
                 checkpoint_path,
             )
 
-    print("训练完成")
+    print("Training completed!")
 
 
 if __name__ == "__main__":

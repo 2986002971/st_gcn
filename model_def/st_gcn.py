@@ -328,9 +328,9 @@ class ST_GCN_18(nn.Module):
 
     def __init__(
         self,
-        in_channels,
-        num_class,
-        graph_cfg,
+        in_channels=6,  # 改为6通道输入
+        num_class=14,
+        graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
         edge_importance_weighting=True,
         data_bn=True,
         **kwargs,
@@ -347,6 +347,8 @@ class ST_GCN_18(nn.Module):
         temporal_kernel_size = 9
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1)) if data_bn else iden
+
+        # 主干网络
         kwargs0 = {k: v for k, v in kwargs.items() if k != "dropout"}
         self.st_gcn_networks = nn.ModuleList(
             (
@@ -365,7 +367,6 @@ class ST_GCN_18(nn.Module):
             )
         )
 
-        # initialize parameters for edge importance weighting
         if edge_importance_weighting:
             self.edge_importance = nn.ParameterList(
                 [nn.Parameter(torch.ones(self.A.size())) for i in self.st_gcn_networks]
@@ -373,10 +374,11 @@ class ST_GCN_18(nn.Module):
         else:
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
-        # 只保留分类��，移除准确度预测分支
-        self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
+        # 双头输出
+        self.fcn_cls = nn.Conv2d(256, num_class, kernel_size=1)  # 分类头
+        self.fcn_quality = nn.Conv2d(256, 1, kernel_size=1)  # 标准度头
 
-    def forward(self, x):
+    def forward(self, x, output_quality=False):
         # data normalization
         N, C, T, V, M = x.size()
         x = x.permute(0, 4, 3, 1, 2).contiguous()
@@ -386,7 +388,7 @@ class ST_GCN_18(nn.Module):
         x = x.permute(0, 1, 3, 4, 2).contiguous()
         x = x.view(N * M, C, T, V)
 
-        # forward
+        # forward backbone
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance)
 
@@ -394,10 +396,15 @@ class ST_GCN_18(nn.Module):
         x = F.avg_pool2d(x, x.size()[2:])
         x = x.view(N, M, -1, 1, 1).mean(dim=1)
 
-        # 输出logits
-        x = self.fcn(x).view(x.size(0), -1)
+        # 分类输出
+        cls_out = self.fcn_cls(x).view(x.size(0), -1)
 
-        return x
+        if output_quality:
+            # 标准度输出
+            quality_out = self.fcn_quality(x).view(x.size(0), -1).squeeze(1)
+            return cls_out, quality_out
+
+        return cls_out
 
     def extract_feature(self, x):
         # data normalization
@@ -417,7 +424,7 @@ class ST_GCN_18(nn.Module):
         feature = x.view(N, M, c, t, v).permute(0, 2, 3, 4, 1)
 
         # prediction
-        x = self.fcn(x)
+        x = self.fcn_cls(x)
         output = x.view(N, M, -1, t, v).permute(0, 2, 3, 4, 1)
 
         return output, feature
