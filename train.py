@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 
 from model_def.st_gcn import ST_GCN_18
@@ -187,24 +188,26 @@ def evaluate(model, val_loader, criterion, device):
 
     with torch.no_grad():
         for data, target, accuracy, _ in val_loader:
-            data, target = data.to(device).half(), target.to(device)  # 添加 .half()
-            accuracy = accuracy.to(device).half()  # 添加 .half()
+            data, target = data.to(device), target.to(device)
+            accuracy = accuracy.to(device)
 
             B, N, C, T, V, M = data.shape
             data = data.view(B * N, C, T, V, M)
 
-            quality_out = model(data)
-            quality_out = quality_out.view(B, N)
+            with autocast(device_type="cuda", dtype=torch.float16):
+                quality_out = model(data)
+                quality_out = quality_out.view(B, N)
 
-            # 创建标签掩码
-            label_mask = torch.zeros_like(quality_out)
-            label_mask[torch.arange(B), target] = 1
+                # 创建标签掩码
+                label_mask = torch.zeros_like(quality_out)
+                label_mask[torch.arange(B), target] = 1
 
-            # 计算损失
-            loss = criterion(
-                quality_out * label_mask,
-                accuracy.unsqueeze(1).repeat(1, N) * label_mask,
-            )
+                # 计算损失 (使用 float() 确保 FP32 精度)
+                loss = criterion(
+                    quality_out.float() * label_mask,
+                    accuracy.unsqueeze(1).repeat(1, N).float() * label_mask,
+                )
+
             total_loss += loss.item()
 
             # 计算分类准确率
@@ -216,8 +219,8 @@ def evaluate(model, val_loader, criterion, device):
             correct_mask = pred.eq(target)
             if correct_mask.any():
                 quality_loss += criterion(
-                    quality_out[correct_mask, target[correct_mask]],
-                    accuracy[correct_mask],
+                    quality_out[correct_mask, target[correct_mask]].float(),
+                    accuracy[correct_mask].float(),
                 ).item()
 
     avg_loss = total_loss / len(val_loader)
@@ -231,19 +234,21 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 模型定义
-    model = (
-        ST_GCN_18(
-            in_channels=6,
-            num_class=14,
-            edge_importance_weighting=True,
-            graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
-        )
-        .to(device)
-        .half()
-    )  # 添加 .half()
+    model = ST_GCN_18(
+        in_channels=6,
+        num_class=14,
+        edge_importance_weighting=True,
+        graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
+    ).to(device)
+
+    # 保持 BatchNorm 层为 FP32
+    for m in model.modules():
+        if isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.BatchNorm2d):
+            m.float()
 
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
+    scaler = GradScaler(device="cuda")
 
     train_loader = get_dataloader(
         os.path.join(args.data_dir, "train_data.npy"),
@@ -269,8 +274,8 @@ def train(args):
         total_samples = 0
 
         for batch_idx, (data, target, accuracy, indices) in enumerate(train_loader):
-            data, target = data.to(device).half(), target.to(device)  # 添加 .half()
-            accuracy = accuracy.to(device).half()  # 添加 .half()
+            data, target = data.to(device), target.to(device)
+            accuracy = accuracy.to(device)
 
             optimizer.zero_grad()
 
@@ -278,21 +283,23 @@ def train(args):
             B, N, C, T, V, M = data.shape
             data = data.view(B * N, C, T, V, M)
 
-            quality_out = model(data)
-            quality_out = quality_out.view(B, N)
+            with autocast(device_type="cuda", dtype=torch.float16):
+                quality_out = model(data)
+                quality_out = quality_out.view(B, N)
 
-            # 创建标签掩码
-            label_mask = torch.zeros_like(quality_out)
-            label_mask[torch.arange(B), target] = 1
+                # 创建标签掩码
+                label_mask = torch.zeros_like(quality_out)
+                label_mask[torch.arange(B), target] = 1
 
-            # 计算损失
-            loss = criterion(
-                quality_out * label_mask,
-                accuracy.unsqueeze(1).repeat(1, N) * label_mask,
-            )
+                # 计算损失 (使用 float() 确保 FP32 精度)
+                loss = criterion(
+                    quality_out.float() * label_mask,
+                    accuracy.unsqueeze(1).repeat(1, N).float() * label_mask,
+                )
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_loss += loss.item()
 
