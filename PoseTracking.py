@@ -72,10 +72,6 @@ class ActionPredictor:
         if len(data.shape) == 3:
             data = np.expand_dims(data, axis=-1)
 
-        # 添加零填充通道以匹配训练时的输入
-        zero_channels = np.zeros_like(data)
-        data = np.concatenate([data, zero_channels], axis=0)
-
         return data
 
     def predict(self, video_paths: list) -> None:
@@ -86,38 +82,25 @@ class ActionPredictor:
             for video_path in video_paths:
                 print(f"Processing {video_path}...")
 
-                # Phase 1: 分类
                 data = self._process_video(video_path)
-                data = torch.FloatTensor(data).unsqueeze(0).to(self.device)
-                cls_out, _ = self.model(data, output_quality=True)
 
-                # 获取预测类别
-                pred_class = torch.argmax(cls_out, dim=1).item()
+                # 准备14个版本的数据，每个都与一个标准视频结合
+                combined_data = []
+                for std_idx in range(14):
+                    std_data = self.standard_data[std_idx]
+                    combined = np.concatenate([data, std_data], axis=0)
+                    combined_data.append(combined)
 
-                # Phase 2: 标准度评估
-                std_data = self._get_standard_video(pred_class)
+                combined_data = np.stack(combined_data)  # Shape: (14, C, T, V, M)
+                combined_data = torch.FloatTensor(combined_data).to(self.device)
 
-                # 确保标准视频数据的形状与原始数据相匹配
-                if std_data.shape[1] > data.shape[2]:
-                    std_data = std_data[:, : data.shape[2], :, :]
-                elif std_data.shape[1] < data.shape[2]:
-                    pad_width = (
-                        (0, 0),
-                        (0, data.shape[2] - std_data.shape[1]),
-                        (0, 0),
-                        (0, 0),
-                    )
-                    std_data = np.pad(std_data, pad_width, mode="constant")
+                # 进行14次推理
+                quality_out = self.model(combined_data)
 
-                # 只使用原始数据的前3个通道（去掉零填充通道）和标准数据
-                original_data = data.cpu().numpy().squeeze(0)[:3]  # 只取前3个通道
-                combined_data = np.concatenate([original_data, std_data], axis=0)
-                combined_data = (
-                    torch.FloatTensor(combined_data).unsqueeze(0).to(self.device)
-                )
-                # 进行标准度评估
-                _, quality_out = self.model(combined_data, output_quality=True)
-                pred_accuracy = quality_out.squeeze().item()
+                # 选择最大标准度及其对应的类别
+                max_quality, pred_class = quality_out.max(dim=0)
+                pred_class = pred_class.item()
+                pred_accuracy = max_quality.item()
 
                 # 保存结果
                 results.append([Path(video_path).name, pred_class, pred_accuracy])
@@ -129,11 +112,6 @@ class ActionPredictor:
             writer.writerows(results)
 
         print(f"预测结果已保存到: {self.output_path}")
-
-    def _get_standard_video(self, pred_class):
-        # 获取对应预测类别的标准视频数据
-        std_data = self.standard_data[pred_class]
-        return std_data
 
 
 def parse_args():
@@ -175,6 +153,6 @@ if __name__ == "__main__":
         model_path=args.model_path,
         output_path=args.output_path,
         temp_dir="./temp",
-        standard_data_path="./processed_standard/train_data.npy",  # 添加标准视频数据路径
+        standard_data_path="./processed_standard/train_data.npy",
     )
     predictor.predict(video_paths)

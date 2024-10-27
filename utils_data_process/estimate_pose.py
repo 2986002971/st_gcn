@@ -145,6 +145,7 @@ class PoseEstimator:
                 sum(point) != 0
                 and ref_nose is not None
                 and ref_shoulder_width is not None
+                and ref_shoulder_width != 0
             ):
                 point = self._normalize_coordinates(point, ref_nose, ref_shoulder_width)
 

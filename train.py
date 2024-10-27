@@ -195,30 +195,51 @@ def evaluate(model, val_loader, criterion, device):
             quality_out = model(data)
             quality_out = quality_out.view(B, N)
 
-            # 创建目标矩阵
+            # 修改目标矩阵创建逻辑
             target_matrix = torch.zeros_like(quality_out)
-            target_matrix[torch.arange(B), target] = accuracy
+            for i in range(B):
+                if target[i] < 14:
+                    target_matrix[i, target[i]] = accuracy[i]
 
             # 计算损失
             loss = criterion(quality_out, target_matrix)
 
             # 对正确类别的损失赋予更高的权重
             weight_matrix = torch.ones_like(loss)
-            weight_matrix[torch.arange(B), target] = 10  # 可以调整这个权重
+            for i in range(B):
+                if target[i] < 14:
+                    weight_matrix[i, target[i]] = 10
+                else:
+                    weight_matrix[i, :] = 10  # 对“其他”类的所有输出都赋予高权重
 
             weighted_loss = (loss * weight_matrix).mean()
 
             total_loss += weighted_loss.item()
 
-            # 计算分类准确率
+            # 修改分类准确率计算逻辑
             pred = quality_out.max(dim=1)[1]
-            correct += pred.eq(target).sum().item()
+            for i in range(B):
+                if target[i] == 14:  # 对于“其他”类
+                    # 如果所有输出都小于某个阈值（比如0.3），则认为分类正确
+                    if torch.all(quality_out[i] < 0.3):
+                        correct += 1
+                else:  # 对于0-13类
+                    if pred[i] == target[i]:
+                        correct += 1
             total += B
 
-            # 计算质量评估损失
-            quality_loss += (
-                criterion(quality_out[torch.arange(B), target], accuracy).mean().item()
-            )
+            # 修改质量评估损失计算
+            quality_loss_batch = 0
+            for i in range(B):
+                if target[i] < 14:
+                    quality_loss_batch += criterion(
+                        quality_out[i, target[i]], accuracy[i]
+                    ).mean()
+                else:  # 对于“其他”类
+                    quality_loss_batch += criterion(
+                        quality_out[i], torch.zeros_like(quality_out[i])
+                    ).mean()
+            quality_loss += quality_loss_batch / B
 
     avg_loss = total_loss / len(val_loader)
     accuracy = correct / total
@@ -276,16 +297,22 @@ def train(args):
             quality_out = model(data)
             quality_out = quality_out.view(B, N)
 
-            # 创建目标矩阵
+            # 修改目标矩阵创建逻辑
             target_matrix = torch.zeros_like(quality_out)
-            target_matrix[torch.arange(B), target] = accuracy
+            for i in range(B):
+                if target[i] < 14:
+                    target_matrix[i, target[i]] = accuracy[i]
 
             # 计算损失
             loss = criterion(quality_out, target_matrix)
 
             # 对正确类别的损失赋予更高的权重
             weight_matrix = torch.ones_like(loss)
-            weight_matrix[torch.arange(B), target] = 10  # 可以调整这个权重
+            for i in range(B):
+                if target[i] < 14:
+                    weight_matrix[i, target[i]] = 10
+                else:
+                    weight_matrix[i, :] = 10  # 对“其他”类的所有输出都赋予高权重
 
             weighted_loss = (loss * weight_matrix).mean()
 
@@ -296,7 +323,14 @@ def train(args):
 
             # 统计
             pred = quality_out.max(dim=1)[1]
-            correct_samples += pred.eq(target).sum().item()
+            for i in range(B):
+                if target[i] == 14:  # 对于“其他”类
+                    # 如果所有输出都小于某个阈值（比如0.3），则认为分类正确
+                    if torch.all(quality_out[i] < 0.3):
+                        correct_samples += 1
+                else:  # 对于0-13类
+                    if pred[i] == target[i]:
+                        correct_samples += 1
             total_samples += B
 
             if batch_idx % 100 == 0:
