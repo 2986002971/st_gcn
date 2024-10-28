@@ -182,7 +182,6 @@ def evaluate(model, val_loader, criterion, device):
     total_loss = 0
     correct = 0
     total = 0
-    quality_loss = 0
 
     with torch.no_grad():
         for data, target, accuracy, _ in val_loader:
@@ -209,8 +208,6 @@ def evaluate(model, val_loader, criterion, device):
             for i in range(B):
                 if target[i] < 14:
                     weight_matrix[i, target[i]] = 10
-                else:
-                    weight_matrix[i, :] = 10  # 对“其他”类的所有输出都赋予高权重
 
             weighted_loss = (loss * weight_matrix).mean()
 
@@ -228,24 +225,10 @@ def evaluate(model, val_loader, criterion, device):
                         correct += 1
             total += B
 
-            # 修改质量评估损失计算
-            quality_loss_batch = 0
-            for i in range(B):
-                if target[i] < 14:
-                    quality_loss_batch += criterion(
-                        quality_out[i, target[i]], accuracy[i]
-                    ).mean()
-                else:  # 对于“其他”类
-                    quality_loss_batch += criterion(
-                        quality_out[i], torch.zeros_like(quality_out[i])
-                    ).mean()
-            quality_loss += quality_loss_batch / B
-
     avg_loss = total_loss / len(val_loader)
     accuracy = correct / total
-    avg_quality_loss = quality_loss / len(val_loader)
 
-    return avg_loss, accuracy, avg_quality_loss
+    return avg_loss, accuracy
 
 
 def train(args):
@@ -311,8 +294,6 @@ def train(args):
             for i in range(B):
                 if target[i] < 14:
                     weight_matrix[i, target[i]] = 10
-                else:
-                    weight_matrix[i, :] = 10  # 对“其他”类的所有输出都赋予高权重
 
             weighted_loss = (loss * weight_matrix).mean()
 
@@ -340,16 +321,14 @@ def train(args):
 
         # 每5个epoch进行一次验证
         if epoch % 5 == 0:
-            val_loss, val_accuracy, val_quality_loss = evaluate(
-                model, val_loader, criterion, device
-            )
+            val_loss, val_accuracy = evaluate(model, val_loader, criterion, device)
             print(
-                f"Epoch {epoch} - Validation: Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.4f}, Quality Loss: {val_quality_loss:.4f}"
+                f"Epoch {epoch} - Validation: Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.4f}"
             )
 
             # 保存最佳模型
-            if val_quality_loss < best_quality_loss:
-                best_quality_loss = val_quality_loss
+            if val_loss < best_quality_loss:
+                best_quality_loss = val_loss
                 checkpoint_path = os.path.join(args.work_dir, "best_model.pth")
                 torch.save(
                     {

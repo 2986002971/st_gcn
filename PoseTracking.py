@@ -100,7 +100,14 @@ class ActionPredictor:
                 # 选择最大标准度及其对应的类别
                 max_quality, pred_class = quality_out.max(dim=0)
                 pred_class = pred_class.item()
-                pred_accuracy = max_quality.item()
+
+                # 检查是否属于“其他”类（所有输出都接近0）
+                threshold = 0.3  # 阈值
+                if torch.all(quality_out < threshold):
+                    pred_class = 14  # “其他”类，标准度为0
+                    pred_accuracy = 0.0
+                else:
+                    pred_accuracy = max_quality.item()
 
                 # 保存结果
                 results.append([Path(video_path).name, pred_class, pred_accuracy])
