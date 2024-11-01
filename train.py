@@ -26,7 +26,7 @@ def parse_args():
     )
     # 添加最大轮数参数
     parser.add_argument(
-        "--max_epochs", type=int, default=500, help="每个阶段的最大训练轮数"
+        "--max_epochs", type=int, default=2000, help="每个阶段的最大训练轮数"
     )
     return parser.parse_args()
 
@@ -260,9 +260,21 @@ def train(args):
         args.batch_size,
     )
 
+    # 添加从检查点加载模型的逻辑
+    start_epoch = 0
     best_quality_loss = float("inf")
 
-    for epoch in range(args.max_epochs):
+    if args.resume_from and os.path.exists(args.resume_from):
+        print(f"正在从检查点加载模型: {args.resume_from}")
+        checkpoint = torch.load(args.resume_from)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        best_quality_loss = checkpoint["best_quality_loss"]
+        print(f"成功加载检查点，从第 {start_epoch} 轮继续训练")
+
+    # 修改训练循环的起始位置
+    for epoch in range(start_epoch, args.max_epochs):
         model.train()
         total_loss = 0
         correct_samples = 0
