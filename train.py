@@ -178,10 +178,14 @@ def get_dataloader(data_path, label_path, batch_size, **kwargs):
 
 
 def evaluate(model, val_loader, criterion, device):
-    model.eval()
+    model.eval()  # 确保模型处于评估模式
     total_loss = 0
     correct = 0
     total = 0
+
+    # 添加统计信息
+    class_correct = torch.zeros(15)  # 0-14类的正确数
+    class_total = torch.zeros(15)  # 0-14类的总数
 
     with torch.no_grad():
         for data, target, accuracy, _ in val_loader:
@@ -216,19 +220,24 @@ def evaluate(model, val_loader, criterion, device):
             # 修改分类准确率计算逻辑
             pred = quality_out.max(dim=1)[1]
             for i in range(B):
+                class_total[target[i]] += 1
                 if target[i] == 14:  # 对于“其他”类
                     # 如果所有输出都小于某个阈值（比如0.3），则认为分类正确
                     if torch.all(quality_out[i] < 0.3):
                         correct += 1
-                else:  # 对于0-13类
+                        class_correct[target[i]] += 1
+                else:
                     if pred[i] == target[i]:
                         correct += 1
+                        class_correct[target[i]] += 1
             total += B
 
-    avg_loss = total_loss / len(val_loader)
-    accuracy = correct / total
+    # 打印每个类别的准确率
+    for i in range(15):
+        if class_total[i] > 0:
+            print(f"Class {i} Accuracy: {class_correct[i]/class_total[i]:.4f}")
 
-    return avg_loss, accuracy
+    return total_loss / len(val_loader), correct / total
 
 
 def train(args):
