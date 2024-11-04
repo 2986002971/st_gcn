@@ -160,7 +160,18 @@ class SkeletonFeeder(Dataset):
         self.random_choose = random_choose
         self.random_move = random_move
         self.window_size = window_size
+        self.alignment_cache = {}  # 添加缓存字典
         self.load_data()
+
+    def _get_alignment(self, index, std_idx):
+        """获取对齐结果，如果缓存中没有则计算并缓存"""
+        cache_key = (index, std_idx)
+        if cache_key not in self.alignment_cache:
+            data_numpy = self.data[index]
+            std_data = self.standard_data[std_idx]
+            aligned_data = align_sequences_xy(data_numpy, std_data, radius_frames=150)
+            self.alignment_cache[cache_key] = aligned_data
+        return self.alignment_cache[cache_key]
 
     def load_data(self):
         # 加载原始数据
@@ -180,17 +191,17 @@ class SkeletonFeeder(Dataset):
         return len(self.label)
 
     def __getitem__(self, index):
-        data_numpy = self.data[index]
         label = self.label[index]
         accuracy = self.accuracy[index] * 100
 
         combined_data = []
         for std_idx in range(14):
-            std_data = self.standard_data[std_idx]
-            # 首先对齐序列
-            aligned_data = align_sequences_xy(data_numpy, std_data, radius_frames=150)
+            # 使用缓存获取对齐结果
+            aligned_data = self._get_alignment(index, std_idx)
             # 然后合并
-            combined = np.concatenate([aligned_data, std_data], axis=0)
+            combined = np.concatenate(
+                [aligned_data, self.standard_data[std_idx]], axis=0
+            )
 
             if self.random_choose:
                 combined = random_choose(combined, self.window_size)
