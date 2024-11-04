@@ -258,9 +258,6 @@ def train(args):
         os.path.join(args.data_dir, "train_data.npy"),
         os.path.join(args.data_dir, "train_label.pkl"),
         args.batch_size,
-        random_choose=True,
-        random_move=True,
-        window_size=600,
     )
 
     val_loader = get_dataloader(
