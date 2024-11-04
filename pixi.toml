@@ -15,3 +15,4 @@ pytorch = { version = "*", channel = "pytorch" }
 torchvision = { version = "*", channel = "pytorch" }
 pytorch-cuda = { version = "*", channel = "pytorch" }
 ultralytics = "*"
+fastdtw = "*"
