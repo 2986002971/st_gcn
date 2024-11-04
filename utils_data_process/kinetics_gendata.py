@@ -228,6 +228,10 @@ class KineticsDataProcessor:
         # 填充数据
         for frame_info in json_data["data"]:
             frame_idx = frame_info["frame_index"]
+            # 添加截断逻辑
+            if frame_idx >= self.max_frames:
+                continue  # 跳过超出最大帧数的帧
+
             for m, skeleton_info in enumerate(frame_info["skeleton"]):
                 if m >= self.num_person_in:
                     break

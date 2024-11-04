@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,7 @@ class ActionPredictor:
     def __init__(
         self,
         model_path: str = "./model_def/best_model.pth",
-        output_path: str = "./15802228557_submit.csv",
+        output_path: str = "./submit.csv",
         temp_dir: str = "./temp",
         standard_data_path: str = "./processed_standard/train_data.npy",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -96,6 +97,8 @@ class ActionPredictor:
 
                 # 进行14次推理
                 quality_out = self.model(combined_data)
+                # 归一化回0-1
+                quality_out /= 100
 
                 # 选择最大标准度及其对应的类别
                 max_quality, pred_class = quality_out.max(dim=0)
@@ -112,7 +115,10 @@ class ActionPredictor:
                 # 保存结果
                 results.append([Path(video_path).name, pred_class, pred_accuracy])
 
-        # 保存为CSV文件
+        # 确保输出目录存在
+        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+
+        # 然后再打开文件写入
         with open(self.output_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["video_name", "predicted_class", "accuracy"])
@@ -138,7 +144,7 @@ def parse_args():
     parser.add_argument(
         "--output_path",
         type=str,
-        default=str(script_dir / "15802228557_submit.csv"),
+        default=str("./submit.csv"),
         help="输出CSV文件路径",
     )
     return parser.parse_args()
