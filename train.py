@@ -188,7 +188,7 @@ class SkeletonFeeder(Dataset):
         for std_idx in range(14):
             std_data = self.standard_data[std_idx]
             # 首先对齐序列
-            aligned_data = align_sequences_xy(data_numpy, std_data, radius_seconds=5)
+            aligned_data = align_sequences_xy(data_numpy, std_data, radius_frames=150)
             # 然后合并
             combined = np.concatenate([aligned_data, std_data], axis=0)
 
