@@ -6,8 +6,6 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from fastdtw import fastdtw
-from scipy.spatial.distance import euclidean
 from torch.utils.data import DataLoader, Dataset
 
 from model_def.st_gcn import ST_GCN_18
@@ -109,41 +107,6 @@ def random_move(
     return data_numpy
 
 
-def align_sequences_xy(data_numpy, std_data, radius_frames=150):
-    """
-    对齐两个骨骼序列, 只考虑xy坐标, 并限制搜索半径
-
-    参数:
-    - data_numpy: shape (C, T1, V, M)
-    - std_data: shape (C, T2, V, M)
-    - radius_frames: DTW搜索窗口的半径
-    """
-    # 只取xy坐标通道并重塑
-    # 将每个时间步的所有关节点的xy坐标展平为一个向量
-    seq1_xy = data_numpy[:2].reshape(2, data_numpy.shape[1], -1)  # (2, T1, V*M)
-    seq2_xy = std_data[:2].reshape(2, std_data.shape[1], -1)  # (2, T2, V*M)
-
-    # 计算每个时间步的平均特征向量
-    seq1_mean = seq1_xy.mean(axis=0)  # (T1, V*M)
-    seq2_mean = seq2_xy.mean(axis=0)  # (T2, V*M)
-
-    # 使用fastdtw计算对齐路径
-    _, path = fastdtw(seq1_mean, seq2_mean, dist=euclidean, radius=radius_frames)
-    path = np.array(path)
-
-    # 根据路径对所有通道进行对齐
-    aligned_data = np.zeros_like(data_numpy)
-    for c in range(data_numpy.shape[0]):
-        aligned_channel = np.zeros(
-            (std_data.shape[1], data_numpy.shape[2], data_numpy.shape[3])
-        )
-        for i, j in path:
-            aligned_channel[j] = data_numpy[c, i, :, :]
-        aligned_data[c] = aligned_channel
-
-    return aligned_data
-
-
 class SkeletonFeeder(Dataset):
     def __init__(
         self,
@@ -160,18 +123,7 @@ class SkeletonFeeder(Dataset):
         self.random_choose = random_choose
         self.random_move = random_move
         self.window_size = window_size
-        self.alignment_cache = {}  # 添加缓存字典
         self.load_data()
-
-    def _get_alignment(self, index, std_idx):
-        """获取对齐结果，如果缓存中没有则计算并缓存"""
-        cache_key = (index, std_idx)
-        if cache_key not in self.alignment_cache:
-            data_numpy = self.data[index]
-            std_data = self.standard_data[std_idx]
-            aligned_data = align_sequences_xy(data_numpy, std_data, radius_frames=150)
-            self.alignment_cache[cache_key] = aligned_data
-        return self.alignment_cache[cache_key]
 
     def load_data(self):
         # 加载原始数据
@@ -191,17 +143,15 @@ class SkeletonFeeder(Dataset):
         return len(self.label)
 
     def __getitem__(self, index):
+        data_numpy = self.data[index]
         label = self.label[index]
-        accuracy = self.accuracy[index] * 100
+        accuracy = self.accuracy[index] * 100  # 将accuracy乘以100
 
+        # 准备14个版本的数据，每个都与一个标准视频结合
         combined_data = []
         for std_idx in range(14):
-            # 使用缓存获取对齐结果
-            aligned_data = self._get_alignment(index, std_idx)
-            # 然后合并
-            combined = np.concatenate(
-                [aligned_data, self.standard_data[std_idx]], axis=0
-            )
+            std_data = self.standard_data[std_idx]
+            combined = np.concatenate([data_numpy, std_data], axis=0)
 
             if self.random_choose:
                 combined = random_choose(combined, self.window_size)
