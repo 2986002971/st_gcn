@@ -222,8 +222,8 @@ def evaluate(model, val_loader, criterion, device):
             for i in range(B):
                 class_total[target[i]] += 1
                 if target[i] == 14:  # 对于“其他”类
-                    # 如果所有输出都小于某个阈值（比如0.3），则认为分类正确
-                    if torch.all(quality_out[i] < 0.3):
+                    # 如果所有输出都小于某个阈值（比如30），则认为分类正确
+                    if torch.all(quality_out[i] < 30):
                         correct += 1
                         class_correct[target[i]] += 1
                 else:
@@ -327,8 +327,8 @@ def train(args):
             pred = quality_out.max(dim=1)[1]
             for i in range(B):
                 if target[i] == 14:  # 对于“其他”类
-                    # 如果所有输出都小于某个阈值（比如0.3），则认为分类正确
-                    if torch.all(quality_out[i] < 0.3):
+                    # 如果所有输出都小于某个阈值（比如30），则认为分类正确
+                    if torch.all(quality_out[i] < 30):
                         correct_samples += 1
                 else:  # 对于0-13类
                     if pred[i] == target[i]:
