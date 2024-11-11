@@ -106,12 +106,44 @@ class LabelGenerator:
         with open(output_path, "w") as output_json_file:
             json.dump(data, output_json_file, indent=4)
 
-    def generate(self) -> None:
+    def _sort_and_save_label_file(self, input_file: str) -> None:
+        """
+        读取标签文件，按标签索引排序后重新保存
+
+        Args:
+            input_file: 输入文件路径
+        """
+        # 读取原始json文件
+        with open(input_file, "r") as f:
+            data = json.load(f)
+
+        # 将数据转换为列表并按label_index排序
+        sorted_items = sorted(data.items(), key=lambda x: x[1]["label_index"])
+
+        # 转换回有序字典
+        sorted_data = {k: v for k, v in sorted_items}
+
+        # 保存排序后的数据
+        with open(input_file, "w") as f:
+            json.dump(sorted_data, f, indent=4)
+
+    def generate(self, sort_by_label: bool = False) -> None:
         """
         生成训练集和验证集的标签文件
+
+        Args:
+            sort_by_label: 是否按标签索引排序，默认为False
         """
         self._combine_json_files(self.train_folder, "train_label.json")
         self._combine_json_files(self.val_folder, "val_label.json")
+
+        if sort_by_label:
+            train_label_path = os.path.join(self.output_path, "train_label.json")
+            val_label_path = os.path.join(self.output_path, "val_label.json")
+            self._sort_and_save_label_file(train_label_path)
+            self._sort_and_save_label_file(val_label_path)
+            print("标签文件已按标签索引排序")
+
         print(f"标签生成完成！文件保存在: {self.output_path}")
 
 

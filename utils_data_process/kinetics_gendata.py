@@ -51,10 +51,10 @@ class KineticsDataset(Dataset):
 
     def _load_data(self) -> None:
         """加载数据和标签"""
-        # 加载文件列表
-        self.sample_names = [
-            f for f in os.listdir(self.data_path) if f.endswith(".json")
-        ]
+        # 加载文件列表并排序
+        self.sample_names = sorted(
+            [f for f in os.listdir(self.data_path) if f.endswith(".json")]
+        )
         if self.debug:
             self.sample_names = self.sample_names[:2]
 
