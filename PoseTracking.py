@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -15,16 +16,18 @@ class ActionPredictor:
     def __init__(
         self,
         model_path: str = "./model_def/best_model.pth",
+        svm_path: str = "./model_def/quality_predictor.pkl",
         output_path: str = "./submit.csv",
         temp_dir: str = "./temp",
         standard_data_path: str = "./processed_standard/train_data.npy",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.model_path = model_path
+        self.svm_path = svm_path
         self.output_path = output_path
         self.temp_dir = Path(temp_dir)
         self.device = device
-        self.standard_data_path = standard_data_path  # 保存标准视频数据路径
+        self.standard_data_path = standard_data_path
 
         # 创建临时目录
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -41,20 +44,25 @@ class ActionPredictor:
         self.load_standard_data()
 
     def _init_model(self):
-        """初始化ST-GCN模型"""
+        """初始化ST-GCN模型和SVM模型"""
+        # 初始化ST-GCN
         num_class = 14
         graph_cfg = {"layout": "coco", "strategy": "spatial", "max_hop": 2}
         self.model = ST_GCN_18(
-            in_channels=6,  # 修改为6，以匹配训练时的输入通道数
+            in_channels=6,
             num_class=num_class,
             edge_importance_weighting=True,
             graph_cfg=graph_cfg,
         ).to(self.device)
 
-        # 加载模型权重
+        # 加载ST-GCN权重
         checkpoint = torch.load(self.model_path, map_location=self.device)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.model.eval()
+
+        # 加载SVM模型
+        with open(self.svm_path, "rb") as f:
+            self.quality_predictor = pickle.load(f)
 
     def load_standard_data(self):
         # 加载标准视频数据
@@ -85,40 +93,47 @@ class ActionPredictor:
 
                 data = self._process_video(video_path)
 
-                # 准备14个版本的数据，每个都与一个标准视频结合
+                # 准备14个版本的数据
                 combined_data = []
                 for std_idx in range(14):
                     std_data = self.standard_data[std_idx]
                     combined = np.concatenate([data, std_data], axis=0)
                     combined_data.append(combined)
 
-                combined_data = np.stack(combined_data)  # Shape: (14, C, T, V, M)
+                combined_data = np.stack(combined_data)
                 combined_data = torch.FloatTensor(combined_data).to(self.device)
 
-                # 进行14次推理
-                quality_out = self.model(combined_data)
-                # 归一化回0-1
-                quality_out /= 100
+                # ST-GCN推理
+                stgcn_out = self.model(combined_data)
+                stgcn_features = stgcn_out.cpu().numpy()
 
-                # 选择最大标准度及其对应的类别
-                max_quality, pred_class = quality_out.max(dim=0)
-                pred_class = pred_class.item()
+                # 计算平均特征并确保是2D数组
+                mean_features = stgcn_features.reshape(1, -1)
 
-                # 检查是否属于“其他”类（所有输出都接近0）
-                threshold = 0.3  # 阈值
-                if torch.all(quality_out < threshold):
-                    pred_class = 14  # “其他”类，标准度为0
-                    pred_accuracy = 0.0
-                else:
-                    pred_accuracy = max_quality.item()
+                # 使用SVM进行预测
+                # 标准化特征
+                scaled_features = self.quality_predictor["feature_scaler"].transform(
+                    mean_features
+                )
+
+                # 预测类别和质量分数
+                pred_class = self.quality_predictor["classifier"].predict(
+                    scaled_features
+                )[0]
+                pred_accuracy = self.quality_predictor["regressor"].predict(
+                    scaled_features
+                )[0]
+
+                # 确保质量分数在0-1范围内
+                pred_accuracy = np.clip(pred_accuracy, 0, 1)
 
                 # 保存结果
-                results.append([Path(video_path).name, pred_class, pred_accuracy])
+                results.append(
+                    [Path(video_path).name, int(pred_class), float(pred_accuracy)]
+                )
 
-        # 确保输出目录存在
+        # 写入结果
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
-
-        # 然后再打开文件写入
         with open(self.output_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["video_name", "predicted_class", "accuracy"])
@@ -128,7 +143,6 @@ class ActionPredictor:
 
 
 def parse_args():
-    # 获取脚本所在目录
     script_dir = Path(__file__).parent
 
     parser = argparse.ArgumentParser(description="动作识别推理脚本")
@@ -136,7 +150,13 @@ def parse_args():
         "--model_path",
         type=str,
         default=str(script_dir / "model_def/best_model.pth"),
-        help="模型权重文件路径",
+        help="ST-GCN模型权重文件路径",
+    )
+    parser.add_argument(
+        "--svm_path",
+        type=str,
+        default=str(script_dir / "model_def/quality_predictor.pkl"),
+        help="SVM模型文件路径",
     )
     parser.add_argument(
         "--video_dir", type=str, default="/home/service/video", help="视频文件夹路径"
@@ -153,7 +173,6 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    # 获取所有视频文件
     video_dir = Path(args.video_dir)
     video_paths = list(video_dir.glob("*.mp4"))
 
@@ -161,9 +180,9 @@ if __name__ == "__main__":
         print(f"在 {args.video_dir} 中未找到视频文件")
         exit(1)
 
-    # 创建预测器并运行预测
     predictor = ActionPredictor(
         model_path=args.model_path,
+        svm_path=args.svm_path,
         output_path=args.output_path,
         temp_dir="./temp",
         standard_data_path="./processed_standard/train_data.npy",
