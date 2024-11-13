@@ -17,7 +17,7 @@ class ActionPredictor:
         self,
         model_path: str = "./model_def/best_model.pth",
         svm_path: str = "./model_def/quality_predictor.pkl",
-        output_path: str = "./submit.csv",
+        output_path: str = "/home/service/result/15802228557/15802228557_submit.csv",
         temp_dir: str = "./temp",
         standard_data_path: str = "./processed_standard/train_data.npy",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -164,7 +164,7 @@ def parse_args():
     parser.add_argument(
         "--output_path",
         type=str,
-        default=str("./submit.csv"),
+        default=str("/home/service/result/15802228557/15802228557_submit.csv"),
         help="输出CSV文件路径",
     )
     return parser.parse_args()
