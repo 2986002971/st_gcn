@@ -153,6 +153,36 @@ class Graph:
             neighbor_link = [(i - 1, j - 1) for (i, j) in neighbor_1base]
             self.edge = self_link + neighbor_link
             self.center = 2
+        elif layout == "dual_coco":
+            self.num_node = 14
+            self_link = [(i, i) for i in range(self.num_node)]
+            neighbor_link = [
+                (4, 5),
+                (0, 2),
+                (0, 3),
+                (0, 4),
+                (0, 5),
+                (0, 6),
+                (0, 8),
+                (2, 4),
+                (2, 6),
+                (3, 5),
+                (3, 8),
+                (4, 6),
+                (5, 8),
+                (6, 7),
+                (8, 9),
+                (1, 2),
+                (1, 3),
+                (1, 10),
+                (1, 12),
+                (2, 10),
+                (3, 12),
+                (10, 11),
+                (12, 13),
+            ]
+            self.edge = self_link + neighbor_link
+            self.center = 0
         elif layout == "coco":
             self.num_node = 17
             self_link = [(i, i) for i in range(self.num_node)]

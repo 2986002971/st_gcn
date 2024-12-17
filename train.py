@@ -248,7 +248,7 @@ def train(args):
         in_channels=6,
         num_class=14,
         edge_importance_weighting=True,
-        graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
+        graph_cfg={"layout": "dual_coco", "strategy": "spatial", "max_hop": 2},
     ).to(device)
 
     criterion = nn.MSELoss(reduction="none")
