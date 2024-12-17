@@ -348,19 +348,17 @@ class ST_GCN_18(nn.Module):
         **kwargs (optional): Other parameters for graph convolution units
 
     Shape:
-        - Input: :math:`(N, in_channels, T_{in}, V_{in}, M_{in})`
+        - Input: :math:`(N, in_channels, T_{in}, V_{in})`
         - Output: :math:`(N, num_class)` where
             :math:`N` is a batch size,
             :math:`T_{in}` is a length of input sequence,
-            :math:`V_{in}` is the number of graph nodes,
-            :math:`M_{in}` is the number of instance in a frame.
+            :math:`V_{in}` is the number of graph nodes.
     """
 
     def __init__(
         self,
-        in_channels=6,  # 改为6通道输入
-        num_class=14,
-        graph_cfg={"layout": "coco", "strategy": "spatial", "max_hop": 2},
+        in_channels=4,  # 改为4通道输入（学生序列2通道+参考序列2通道）
+        graph_cfg={"layout": "dual_coco", "strategy": "spatial", "max_hop": 2},
         edge_importance_weighting=True,
         data_bn=True,
         **kwargs,
@@ -404,18 +402,15 @@ class ST_GCN_18(nn.Module):
         else:
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
-        # 只保留标准度输出头
-        self.fcn_quality = nn.Conv2d(256, 1, kernel_size=1)  # 标准度头
+        # 输出头：输出单个相似度分数
+        self.fcn = nn.Conv2d(256, 1, kernel_size=1)
 
     def forward(self, x):
         # data normalization
-        N, C, T, V, M = x.size()
-        x = x.permute(0, 4, 3, 1, 2).contiguous()
-        x = x.view(N * M, V * C, T)
+        N, C, T, V = x.size()  # 移除 M 维度
+        x = x.view(N, V * C, T)
         x = self.data_bn(x)
-        x = x.view(N, M, V, C, T)
-        x = x.permute(0, 1, 3, 4, 2).contiguous()
-        x = x.view(N * M, C, T, V)
+        x = x.view(N, C, T, V)
 
         # forward backbone
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
@@ -423,32 +418,29 @@ class ST_GCN_18(nn.Module):
 
         # global pooling
         x = F.avg_pool2d(x, x.size()[2:])
-        x = x.view(N, M, -1, 1, 1).mean(dim=1)
+        x = x.view(N, -1, 1, 1)
 
-        # 标准度输出
-        quality_out = self.fcn_quality(x).view(x.size(0), -1).squeeze(1)
-        return quality_out
+        # 输出单个相似度分数
+        x = self.fcn(x)
+        return x.view(N)  # [N]
 
     def extract_feature(self, x):
         # data normalization
-        N, C, T, V, M = x.size()
-        x = x.permute(0, 4, 3, 1, 2).contiguous()
-        x = x.view(N * M, V * C, T)
+        N, C, T, V = x.size()  # 移除 M 维度
+        x = x.view(N, V * C, T)
         x = self.data_bn(x)
-        x = x.view(N, M, V, C, T)
-        x = x.permute(0, 1, 3, 4, 2).contiguous()
-        x = x.view(N * M, C, T, V)
+        x = x.view(N, C, T, V)
 
         # forwad
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance)
 
         _, c, t, v = x.size()
-        feature = x.view(N, M, c, t, v).permute(0, 2, 3, 4, 1)
+        feature = x.view(N, c, t, v)
 
         # prediction
-        x = self.fcn_quality(x)
-        output = x.view(N, M, -1, t, v).permute(0, 2, 3, 4, 1)
+        x = self.fcn(x)
+        output = x.view(N, -1, t, v)
 
         return output, feature
 

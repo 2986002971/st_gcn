@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
-import torch
+import numpy as np
+from dual_coco import dual_coco_edges  # 导入边的定义
 from ultralytics import YOLO
 
 
@@ -46,54 +47,61 @@ class PoseEstimator:
         duration = frame_number / rate  # 帧速率/视频总帧数 是时间，除以60之后单位是分钟
         return cap, rate, frame_number, duration
 
+    @staticmethod
+    def _calculate_edge_angle(point1: np.ndarray, point2: np.ndarray) -> float:
+        """
+        计算从point1指向point2的有向角度
+
+        Args:
+            point1: 起始点坐标 [x, y]
+            point2: 终止点坐标 [x, y]
+
+        Returns:
+            float: 角度值（度数，范围-180到180）
+        """
+        dx = point2[0] - point1[0]
+        dy = point2[1] - point1[1]
+        angle = np.degrees(np.arctan2(dy, dx))
+        return float(angle)
+
     def _process_single_frame(self, img) -> Tuple[List[float], List[float]]:
         """
-        处理单帧图像
+        处理单帧图像，计算边的角度和置信度
 
         Args:
             img: 输入图像
 
         Returns:
-            Tuple[List[float], List[float]]: 关键点坐标和置信度
+            Tuple[List[float], List[float]]: 边的角度和置信度
         """
         result = self.model(img, conf=0.5)[0]
+        keypoints = result.keypoints.xyn  # 归一化坐标 (0-1)
         keypoints_conf = result.keypoints.conf
-        keypoints_coords = result.keypoints.xyn
 
         if keypoints_conf is None:
-            keypoints_conf = torch.zeros(17).unsqueeze(0)
-            keypoints_coords = torch.zeros(34).unsqueeze(0).unsqueeze(0)
+            # 如果没有检测到关键点，返回全0
+            return [0.0] * len(dual_coco_edges), [0.0] * len(dual_coco_edges)
 
-        coords = keypoints_coords[0].cpu().numpy()
-        coords_flat = coords.flatten()
-        conf = keypoints_conf.cpu().numpy()[0]
+        # 获取关键点坐标和置信度
+        coords = keypoints[0].cpu().numpy()  # [17, 2]
+        conf = keypoints_conf.cpu().numpy()[0]  # [17]
 
-        point = [float(round(i, 6)) for i in coords_flat]
-        conf = [float(round(i, 6)) for i in conf]
-        return point, conf
+        # 计算每条边的角度和置信度
+        angles = []
+        edge_conf = []
+        for start_idx, end_idx in dual_coco_edges:
+            # 注意：这里的索引已经是0-based
+            start_point = coords[start_idx - 1]  # 转换为0-based索引
+            end_point = coords[end_idx - 1]
 
-    @staticmethod
-    def _normalize_coordinates(
-        points: List[float], ref_nose: Tuple[float, float], ref_shoulder_width: float
-    ) -> List[float]:
-        """
-        归一化坐标
+            angle = self._calculate_edge_angle(start_point, end_point)
+            # 边的置信度取两个端点置信度的最小值
+            edge_confidence = min(conf[start_idx - 1], conf[end_idx - 1])
 
-        Args:
-            points: 原始坐标点列表
-            ref_nose: 参考鼻子位置
-            ref_shoulder_width: 参考肩宽
+            angles.append(float(round(angle, 6)))
+            edge_conf.append(float(round(edge_confidence, 6)))
 
-        Returns:
-            List[float]: 归一化后的坐标点列表
-        """
-        normalized_points = []
-        for i in range(0, len(points), 2):
-            x, y = points[i : i + 2]
-            norm_x = (x - ref_nose[0]) / ref_shoulder_width
-            norm_y = (y - ref_nose[1]) / ref_shoulder_width
-            normalized_points.extend([round(norm_x, 3), round(norm_y, 3)])
-        return normalized_points
+        return angles, edge_conf
 
     def process_video(
         self,
@@ -112,15 +120,20 @@ class PoseEstimator:
         Returns:
             Dict: 处理结果
         """
-        # 从文件名中提取准确度
+        # 从文件名中提取14个评分
         video_name = Path(video_path).stem
-        accuracy = float(video_name.split("_")[1]) if "_" in video_name else 0.0
+        if "_" in video_name:
+            # 格式: "01_0.603_0.472_0.622..." -> [0.603, 0.472, 0.622, ...]
+            parts = video_name.split("_")
+            accuracies = [float(score) for score in parts[1:]]
+            # 确保有14个评分，如果不足则补0
+            accuracies.extend([0.0] * (14 - len(accuracies)))
+        else:
+            accuracies = [0.0] * 14
 
         cap, rate, frame_number, duration = self._input_reader(video_path)
         frame_index = 0
         jsdata = []
-        ref_nose = None
-        ref_shoulder_width = None
 
         while cap.isOpened():
             rec, img = cap.read()
@@ -128,31 +141,12 @@ class PoseEstimator:
                 break
             frame_index += 1
 
-            point, conf = self._process_single_frame(img)
+            angles, conf = self._process_single_frame(img)
 
-            # 设置参考帧数据
-            if sum(point) != 0 and ref_nose is None:
-                ref_nose = (point[0], point[1])
-                left_shoulder = (point[10], point[11])
-                right_shoulder = (point[12], point[13])
-                ref_shoulder_width = (
-                    (left_shoulder[0] - right_shoulder[0]) ** 2
-                    + (left_shoulder[1] - right_shoulder[1]) ** 2
-                ) ** 0.5
-
-            # 坐标归一化
-            if (
-                sum(point) != 0
-                and ref_nose is not None
-                and ref_shoulder_width is not None
-                and ref_shoulder_width != 0
-            ):
-                point = self._normalize_coordinates(point, ref_nose, ref_shoulder_width)
-
-            pose_data = {"pose": point, "score": conf}
+            # 只有当至少有一个有效的角度时才添加数据
             frame_data = {
                 "frame_index": frame_index,
-                "skeleton": [pose_data] if sum(point) != 0 else [],
+                "skeleton": [{"angles": angles, "score": conf}] if any(conf) else [],
             }
             jsdata.append(frame_data)
 
@@ -161,7 +155,7 @@ class PoseEstimator:
             "data": jsdata,
             "label": class_name,
             "label_index": label_index,
-            "accuracy": accuracy,  # 添加准确度信息
+            "accuracies": accuracies,  # 现在是一个列表，包含14个评分
         }
 
     def process_dataset(self) -> None:

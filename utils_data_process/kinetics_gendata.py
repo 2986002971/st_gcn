@@ -17,8 +17,6 @@ class KineticsDataset(Dataset):
         self,
         data_path: str,
         label_path: str,
-        num_person_in: int = 5,
-        num_person_out: int = 1,
         max_frames: int = 2000,
         ignore_empty: bool = True,
         debug: bool = False,
@@ -29,23 +27,19 @@ class KineticsDataset(Dataset):
         Args:
             data_path: 数据路径
             label_path: 标签文件路径
-            num_person_in: 输入的人数, 默认5
-            num_person_out: 输出的人数, 默认1
             max_frames: 最大帧数, 默认2000
             ignore_empty: 是否忽略空样本, 默认True
             debug: 是否开启调试模式, 默认False
         """
         self.data_path = Path(data_path)
         self.label_path = Path(label_path)
-        self.num_person_in = num_person_in
-        self.num_person_out = num_person_out
         self.max_frames = max_frames
         self.ignore_empty = ignore_empty
         self.debug = debug
 
         # 数据维度
-        self.channels = 3  # x, y, score
-        self.num_joints = 17  # 关键点数量
+        self.channels = 2  # 角度值和置信度
+        self.num_edges = 14  # 边的数量
 
         self._load_data()
 
@@ -67,7 +61,9 @@ class KineticsDataset(Dataset):
         sample_ids = [name.rsplit(".json", 1)[0] for name in self.sample_names]
 
         self.labels = np.array([label_info[id]["label_index"] for id in sample_ids])
-        self.accuracies = np.array([label_info[id]["accuracy"] for id in sample_ids])
+        self.accuracies = np.array(
+            [label_info[id]["accuracies"] for id in sample_ids]
+        )  # 现在是14个评分
         has_skeleton = np.array([label_info[id]["has_skeleton"] for id in sample_ids])
 
         # 过滤空样本
@@ -85,17 +81,17 @@ class KineticsDataset(Dataset):
         """返回数据集大小"""
         return self.num_samples
 
-    def __getitem__(self, index: int) -> Tuple[np.ndarray, int, float]:  # 修改返回类型
+    def __getitem__(
+        self, index: int
+    ) -> Tuple[np.ndarray, int, np.ndarray]:  # 修改返回类型
         """获取单个样本数据"""
         # 加载数据
         sample_path = self.data_path / self.sample_names[index]
         with open(sample_path) as f:
             video_info = json.load(f)
 
-        # 初始化数据数组
-        data = np.zeros(
-            (self.channels, self.max_frames, self.num_joints, self.num_person_in)
-        )
+        # 初始化数据数组 [C=2, T, V=14]
+        data = np.zeros((self.channels, self.max_frames, self.num_edges))
 
         # 填充数据
         for frame_info in video_info["data"]:
@@ -104,34 +100,17 @@ class KineticsDataset(Dataset):
             if frame_idx >= self.max_frames:
                 continue  # 跳过超出最大帧数的帧
 
-            for m, skeleton_info in enumerate(frame_info["skeleton"]):
-                if m >= self.num_person_in:
-                    break
-                pose = skeleton_info["pose"]
-                score = skeleton_info["score"]
-                data[0, frame_idx, :, m] = pose[0::2]  # x坐标
-                data[1, frame_idx, :, m] = pose[1::2]  # y坐标
-                data[2, frame_idx, :, m] = score  # 置信度
-
-        # 数据归一化
-        data[0:2] = data[0:2] - 0.5
-        data[0][data[2] == 0] = 0
-        data[1][data[2] == 0] = 0
+            if frame_info["skeleton"]:  # 如果有骨架数据
+                skeleton = frame_info["skeleton"][0]  # 只取第一个人的数据
+                data[0, frame_idx, :] = skeleton["angles"]  # 角度数据
+                data[1, frame_idx, :] = skeleton["score"]  # 置信度数据
 
         # 验证标签
         label = int(video_info["label_index"])
-        accuracy = self.accuracies[index]  # 获取准确度
+        accuracies = self.accuracies[index]  # 获取14个准确度值
         assert self.labels[index] == label
 
-        # 按置信度排序
-        sort_idx = (-data[2, :, :, :].sum(axis=1)).argsort(axis=1)
-        for t, s in enumerate(sort_idx):
-            data[:, t, :, :] = data[:, t, :, s].transpose((1, 2, 0))
-
-        # 选择指定数量的人
-        data = data[:, :, :, : self.num_person_out]
-
-        return data, label, accuracy  # 返回数据、标签和准确度
+        return data, label, accuracies
 
 
 class KineticsDataProcessor:
@@ -140,8 +119,6 @@ class KineticsDataProcessor:
     def __init__(
         self,
         data_root: str = "./processed",
-        num_person_in: int = 2,
-        num_person_out: int = 1,
         max_frames: int = 2000,
     ):
         """
@@ -149,13 +126,9 @@ class KineticsDataProcessor:
 
         Args:
             data_root: 数据根目录, 默认 "./processed"
-            num_person_in: 输入人数, 默认2
-            num_person_out: 输出人数, 默认1
             max_frames: 最大帧数, 默认2000
         """
         self.data_root = Path(data_root)
-        self.num_person_in = num_person_in
-        self.num_person_out = num_person_out
         self.max_frames = max_frames
 
     def process(self) -> None:
@@ -171,21 +144,29 @@ class KineticsDataProcessor:
         data_out_path = self.data_root / f"{split}_data.npy"
         label_out_path = self.data_root / f"{split}_label.pkl"
 
+        # 检查目录是否存在且非空
+        if not data_path.exists() or not any(data_path.iterdir()):
+            print(f"跳过 {split} 数据处理：目录为空或不存在")
+            return
+
         # 创建数据集
         dataset = KineticsDataset(
             data_path=data_path,
             label_path=label_path,
-            num_person_in=self.num_person_in,
-            num_person_out=self.num_person_out,
             max_frames=self.max_frames,
         )
+
+        # 如果数据集为空，直接返回
+        if len(dataset) == 0:
+            print(f"跳过 {split} 数据处理：没有有效样本")
+            return
 
         # 创建内存映射文件
         fp = open_memmap(
             str(data_out_path),
             dtype="float32",
             mode="w+",
-            shape=(len(dataset), 3, self.max_frames, 17, self.num_person_out),
+            shape=(len(dataset), 2, self.max_frames, 14),  # [N, C=2, T, V=14]
         )
 
         # 处理数据
@@ -193,7 +174,7 @@ class KineticsDataProcessor:
         sample_accuracies = []  # 添加准确度列表
         for i in tqdm(range(len(dataset)), desc=f"Processing {split} data"):
             data, label, accuracy = dataset[i]  # 获取数据、标签和准确度
-            fp[i, :, : data.shape[1], :, :] = data
+            fp[i] = data
             sample_labels.append(label)
             sample_accuracies.append(accuracy)  # 保存准确度
 
@@ -213,17 +194,10 @@ class KineticsDataProcessor:
             json_data: 包含骨架数据的字典
 
         Returns:
-            np.ndarray: 形状为(C, T, V, M)的数据数组
+            np.ndarray: 形状为(C=2, T, V=14)的数据数组
         """
         # 初始化数据数组
-        data = np.zeros(
-            (
-                3,
-                self.max_frames,
-                17,
-                self.num_person_in,
-            )  # channels, frames, joints, persons
-        )
+        data = np.zeros((2, self.max_frames, 14))  # [C=2, T, V=14]
 
         # 填充数据
         for frame_info in json_data["data"]:
@@ -232,27 +206,10 @@ class KineticsDataProcessor:
             if frame_idx >= self.max_frames:
                 continue  # 跳过超出最大帧数的帧
 
-            for m, skeleton_info in enumerate(frame_info["skeleton"]):
-                if m >= self.num_person_in:
-                    break
-                pose = skeleton_info["pose"]
-                score = skeleton_info["score"]
-                data[0, frame_idx, :, m] = pose[0::2]  # x坐标
-                data[1, frame_idx, :, m] = pose[1::2]  # y坐标
-                data[2, frame_idx, :, m] = score  # 置信度
-
-        # 数据归一化
-        data[0:2] = data[0:2] - 0.5
-        data[0][data[2] == 0] = 0
-        data[1][data[2] == 0] = 0
-
-        # 按置信度排序
-        sort_idx = (-data[2, :, :, :].sum(axis=1)).argsort(axis=1)
-        for t, s in enumerate(sort_idx):
-            data[:, t, :, :] = data[:, t, :, s].transpose((1, 2, 0))
-
-        # 选择指定数量的人
-        data = data[:, :, :, : self.num_person_out]
+            if frame_info["skeleton"]:  # 如果有骨架数据
+                skeleton = frame_info["skeleton"][0]  # 只取第一个人的数据
+                data[0, frame_idx, :] = skeleton["angles"]  # 角度数据
+                data[1, frame_idx, :] = skeleton["score"]  # 置信度数据
 
         return data
 

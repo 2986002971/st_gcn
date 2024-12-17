@@ -63,14 +63,12 @@ class StandardDataProcessor:
             train_folder=self.train_path,
             val_folder=self.val_path,
         )
-        label_generator.generate(sort_by_label=True)
+        label_generator.generate()
 
         # 4. 生成最终的NPY文件
         print("\n4. 生成NPY标准文件...")
         data_processor = KineticsDataProcessor(
             data_root=self.processed_path,
-            num_person_in=2,  # 可以根据需要调整
-            num_person_out=1,
         )
         data_processor.process()
 

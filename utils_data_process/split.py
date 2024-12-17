@@ -1,5 +1,4 @@
 import os
-import random
 import shutil
 from typing import List
 
@@ -53,7 +52,6 @@ class DatasetSplitter:
     ) -> None:
         """单个标签数据的分割和复制"""
         json_files = [f for f in os.listdir(data_folder) if f.endswith(".json")]
-        random.shuffle(json_files)
 
         num_train_files = int(len(json_files) * self.split_ratio)
         train_files = json_files[:num_train_files]
