@@ -228,31 +228,21 @@ def train(args):
 
         for batch_idx, (data, _, accuracies, _) in enumerate(train_loader):
             data = data.to(device)
-            accuracies = accuracies.to(device)  # [B, 14]
-
-            optimizer.zero_grad()
+            accuracies = accuracies.to(device)
 
             B, N, C, T, V = data.shape
             data = data.view(B * N, C, T, V)
 
-            # 模型输出14个相似度分数
-            similarity_scores = model(data)  # [B, 14]
+            optimizer.zero_grad()
+
+            similarity_scores = model(data)
             similarity_scores = similarity_scores.view(B, N)
 
-            # 计算损失：直接使用14个准确度作为目标
-            loss = criterion(similarity_scores, accuracies)  # [B, 14]
-            loss = loss.mean(dim=0)  # [14] 只在批次维度上取平均
-            individual_losses = loss.detach()  # 保存各个损失值用于监控
-            loss = loss.sum()  # 转换为标量以进行反向传播
+            loss = criterion(similarity_scores, accuracies)
+            loss = loss.mean(dim=0)  # [14]
+            loss = loss.sum()  # 标量
+
             loss.backward()
-
-            # 可以打印各个标准序列的损失
-            if batch_idx % 100 == 0:
-                for i in range(14):
-                    print(
-                        f"Standard sequence {i} loss: {individual_losses[i].item():.4f}"
-                    )
-
             optimizer.step()
 
             total_loss += loss.item()
@@ -266,6 +256,9 @@ def train(args):
         if epoch % 5 == 0:
             model.eval()
             val_loss = 0
+            sequence_losses = torch.zeros(14).to(device)  # 记录每个标准序列的累计损失
+            num_batches = 0
+
             with torch.no_grad():
                 for data, _, accuracies, _ in val_loader:
                     data = data.to(device)
@@ -277,11 +270,24 @@ def train(args):
                     similarity_scores = model(data)
                     similarity_scores = similarity_scores.view(B, N)
 
-                    loss = criterion(similarity_scores, accuracies)
-                    val_loss += loss.mean().item()
+                    loss = criterion(similarity_scores, accuracies)  # [B, 14]
+                    batch_losses = loss.mean(dim=0)  # [14]
 
-            val_loss = val_loss / len(val_loader)
-            print(f"Epoch {epoch} - Validation Loss: {val_loss:.4f}")
+                    sequence_losses += batch_losses
+                    val_loss += batch_losses.sum().item()
+                    num_batches += 1
+
+            # 计算平均损失
+            sequence_losses = sequence_losses / num_batches
+            val_loss = val_loss / num_batches
+
+            # 打印详细的验证结果
+            print(f"\nEpoch {epoch} - Validation Results:")
+            print(f"Overall validation loss: {val_loss:.4f}")
+            print("\nIndividual sequence losses:")
+            for i in range(14):
+                print(f"Standard sequence {i:2d}: {sequence_losses[i].item():.4f}")
+            print("-" * 50)
 
             # 保存最佳模型
             if val_loss < best_loss:
