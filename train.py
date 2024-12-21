@@ -240,10 +240,19 @@ def train(args):
             similarity_scores = similarity_scores.view(B, N)
 
             # 计算损失：直接使用14个准确度作为目标
-            loss = criterion(similarity_scores, accuracies)
-            loss = loss.mean()  # 平均所有样本和所有边的损失
-
+            loss = criterion(similarity_scores, accuracies)  # [B, 14]
+            loss = loss.mean(dim=0)  # [14] 只在批次维度上取平均
+            individual_losses = loss.detach()  # 保存各个损失值用于监控
+            loss = loss.sum()  # 转换为标量以进行反向传播
             loss.backward()
+
+            # 可以打印各个标准序列的损失
+            if batch_idx % 100 == 0:
+                for i in range(14):
+                    print(
+                        f"Standard sequence {i} loss: {individual_losses[i].item():.4f}"
+                    )
+
             optimizer.step()
 
             total_loss += loss.item()
