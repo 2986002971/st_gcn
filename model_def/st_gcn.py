@@ -383,14 +383,14 @@ class ST_GCN_18(nn.Module):
                 st_gcn_block(
                     in_channels, 64, kernel_size, 1, residual=False, **kwargs0
                 ),
-                st_gcn_block(64, 64, kernel_size, 1, **kwargs),
-                st_gcn_block(64, 64, kernel_size, 1, **kwargs),
-                st_gcn_block(64, 64, kernel_size, 1, **kwargs),
+                # st_gcn_block(64, 64, kernel_size, 1, **kwargs),
+                # st_gcn_block(64, 64, kernel_size, 1, **kwargs),
+                # st_gcn_block(64, 64, kernel_size, 1, **kwargs),
                 st_gcn_block(64, 128, kernel_size, 2, **kwargs),
-                st_gcn_block(128, 128, kernel_size, 1, **kwargs),
-                st_gcn_block(128, 128, kernel_size, 1, **kwargs),
+                # st_gcn_block(128, 128, kernel_size, 1, **kwargs),
+                # st_gcn_block(128, 128, kernel_size, 1, **kwargs),
                 st_gcn_block(128, 256, kernel_size, 2, **kwargs),
-                st_gcn_block(256, 256, kernel_size, 1, **kwargs),
+                # st_gcn_block(256, 256, kernel_size, 1, **kwargs),
                 st_gcn_block(256, 256, kernel_size, 1, **kwargs),
             )
         )

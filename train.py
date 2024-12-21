@@ -26,7 +26,7 @@ def parse_args():
     )
     # 添加最大轮数参数
     parser.add_argument(
-        "--max_epochs", type=int, default=2000, help="每个阶段的最大训练轮数"
+        "--max_epochs", type=int, default=300, help="每个阶段的最大训练轮数"
     )
     return parser.parse_args()
 
